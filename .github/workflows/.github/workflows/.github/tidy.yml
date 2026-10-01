@@ -1,0 +1,38 @@
+# Moves every file back into its folder (lib/, public/, src/, test/, scripts/), removes stray zips, then deletes itself.
+name: tidy
+on:
+  push:
+    paths: ['.github/workflows/tidy.yml']
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  tidy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Put every file back into its folder
+        run: |
+          set -e
+          mkdir -p lib public src test scripts .github/workflows
+          put() { for f in "${@:2}"; do if [ -f "$f" ]; then git mv -f "$f" "$1/$f"; fi; done; }
+          put lib store.js lpr-parse.js sms.js square.js auth.js photos.js mailer.js
+          put public index.html
+          put src hosted-ui.js body.html tickets.js app.js style.css rules.js reports.js hosted-adapter.js qr.js
+          put test test_rules.js test_rules2.js test_rules3.js test_rules4.js e2e.mjs e2e3.mjs e2e4.mjs restart.sh mock-square.js
+          put scripts render-deploy.sh simulate-cameras.js check-live.sh github-push.sh tidy-upload.yml
+          put .github/workflows tests.yml
+          if [ -f "README (1).md" ]; then
+            if grep -q "## 1. Deploy" README.md; then git mv -f "README (1).md" test/README.md
+            else git mv -f README.md test/README.md; git mv -f "README (1).md" README.md; fi
+          fi
+          if [ -f env.example ]; then git mv -f env.example .env.example; fi
+          for z in *.zip download; do if [ -f "$z" ]; then git rm -q "$z"; fi; done
+          printf 'node_modules/\ndata/\n*.db\n*.db-wal\n*.db-shm\n.env\n' > .gitignore
+          git add .gitignore
+          git rm -q .github/workflows/tidy.yml
+          test -f lib/store.js && test -f public/index.html && test -f public-rules.js && node --check server.js
+          git config user.name "ParkOps"; git config user.email "parkops@users.noreply.github.com"
+          git commit -qm "Put files back into their folders"
+          git push
+          echo; echo "Done. Files are in their folders:"; ls
