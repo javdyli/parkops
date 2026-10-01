@@ -1,0 +1,33 @@
+# One-click deploy on Render: https://render.com/deploy?repo=<this repository's GitHub URL>
+# Render asks for two things only: ADMIN_EMAIL and ADMIN_PASSWORD (the first Owner login).
+# Everything optional (Square, email, texts, custom address) is added later in the Render dashboard:
+#   the service > Environment > Add. See README.md "Settings" for the names:
+#   SQUARE_ENVIRONMENT (sandbox|production), SQUARE_ACCESS_TOKEN, SQUARE_APPLICATION_ID, SQUARE_LOCATION_ID,
+#   SQUARE_TERMINAL_DEVICE_ID, RESEND_API_KEY or SENDGRID_API_KEY, EMAIL_FROM, TWILIO_ACCOUNT_SID,
+#   TWILIO_AUTH_TOKEN, TWILIO_FROM or TWILIO_MESSAGING_SERVICE_SID, TWILIO_DISPLAY_NUMBER, HEALTH_TOKEN,
+#   PUBLIC_URL (only needed once you use your own domain; until then the Render address is used automatically).
+services:
+  - type: web
+    name: parkops
+    runtime: node
+    plan: starter            # a persistent disk (your data) needs a paid instance
+    buildCommand: echo "No build step needed"
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_VERSION
+        value: 22.14.0
+      - key: DATA_DIR
+        value: /var/data
+      - key: TRUST_PROXY
+        value: "1"           # Render adds one proxy hop in front of the app
+      - key: SQUARE_ENVIRONMENT
+        value: sandbox       # payments are simulated until a Square token is added; set to production when you go live
+      - key: ADMIN_EMAIL
+        sync: false          # your email: the first Owner login
+      - key: ADMIN_PASSWORD
+        sync: false          # 10+ characters; add more staff in Settings > People & access afterwards
+    disk:
+      name: parkops-data
+      mountPath: /var/data
+      sizeGB: 1

@@ -1,0 +1,13 @@
+{
+  "name": "parkops-server",
+  "version": "3.0.0",
+  "private": true,
+  "description": "Parking operations for downtown garages and lots: LPR cameras, QR pay-by-plate, monthly parking, Square, Twilio.",
+  "main": "server.js",
+  "engines": { "node": ">=22.13" },
+  "scripts": {
+    "start": "node --no-warnings server.js",
+    "simulate": "node scripts/simulate-cameras.js"
+  },
+  "dependencies": {}
+}

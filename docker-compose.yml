@@ -1,0 +1,29 @@
+# ParkOps behind Caddy (automatic HTTPS). Fill in .env (DOMAIN, PUBLIC_URL=https://$DOMAIN, TRUST_PROXY=1) and run: docker compose up -d
+services:
+  parkops:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATA_DIR: /data
+      PORT: "8080"
+      TRUST_PROXY: "1"
+    volumes:
+      - parkops-data:/data
+    expose:
+      - "8080"
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+volumes:
+  parkops-data:
+  caddy-data:
+  caddy-config:
