@@ -165,9 +165,19 @@
       if (sp.exitAfter) { const e = hm(sp.exitAfter); if (end < zoned(p.year, p.month, p.day, Math.floor(e / 60), e % 60, tz)) return false; }
       return true;
     }
-    function bestSpecial(f, start, end) {
-      const list = ((f && f.rates && f.rates.specials) || []).filter(sp => specialQualifies(sp, f, start, end));
-      return list.sort((a, b) => a.price - b.price)[0] || null;
+    /* Event nights are specials with event dates. A flat special ("charge exactly this price") wins even when the
+       regular rate would be lower: that is how a $25 event rate is collected at the entrance. A stay belongs to an
+       event night when the car entered inside the event's window, however long it then stays. A validated stay is
+       priced without event specials: the code's free time comes off, then the regular rates apply. */
+    const isEvent = sp => !!(sp && Array.isArray(sp.dates) && sp.dates.length);
+    function eventAt(f, start) {
+      if (!start) return null;
+      return ((f && f.rates && f.rates.specials) || []).find(sp => sp.active !== false && isEvent(sp) && specialQualifies(Object.assign({}, sp, { exitBy: null, exitAfter: null, minStayMin: 0 }), f, start, start + M)) || null;
+    }
+    function bestSpecial(f, start, end, skipEvents) {
+      const list = ((f && f.rates && f.rates.specials) || []).filter(sp => !(skipEvents && isEvent(sp)) && specialQualifies(sp, f, start, end));
+      const flat = list.filter(sp => sp.flat).sort((a, b) => a.price - b.price)[0];
+      return flat || list.sort((a, b) => a.price - b.price)[0] || null;
     }
     /* Price of a stay with the full breakdown: parking days, special applied, validation effect.
        Validation types: hours (free time from the original arrival), percent, dollar (amount off), fixed (pay at
@@ -183,8 +193,8 @@
       const days = [];
       const std = standard(f, eff, end, days, start);
       let amount = std, rule = 'standard';
-      const sp = bestSpecial(f, start, end);
-      if (sp && +sp.price < amount) { amount = +sp.price; rule = sp.name || 'special'; out.special = { name: sp.name || 'special', price: +sp.price }; }
+      const sp = bestSpecial(f, start, end, !!val);
+      if (sp && (sp.flat || +sp.price < amount)) { amount = +sp.price; rule = sp.name || 'special'; out.special = { name: sp.name || 'special', price: +sp.price, flat: !!sp.flat }; }
       const before = amount;
       if (val) {
         if (val.type === 'percent') amount *= 1 - (+val.value || 0) / 100;
@@ -200,13 +210,16 @@
     function rateSummary(f) {
       const r = (f && f.rates) || {}, out = [], dn = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
       const t12 = x => { const m = hm(x), h = Math.floor(m / 60), mm = m % 60; return (h % 12 || 12) + (mm ? ':' + pad2(mm) : '') + (h < 12 ? 'am' : 'pm'); };
-      if (r.mode === 'table') (r.table || []).forEach(x => out.push(`Up to ${+x.upTo >= 60 ? (x.upTo / 60) + ' hr' + (x.upTo > 60 ? 's' : '') : x.upTo + ' min'}: ${money(x.price)}`));
+      // A flat daily rate (one table step covering the whole day, capped at that same price) reads as "$10.00 all day".
+      const tbl = (r.table || []).filter(x => +x.upTo > 0), flatDay = r.mode === 'table' && tbl.length === 1 && +tbl[0].upTo >= 1440 && (!(+r.dailyMax > 0) || +r.dailyMax === +tbl[0].price);
+      if (flatDay) out.push(`${money(tbl[0].price)} all day`);
+      else if (r.mode === 'table') (r.table || []).forEach(x => out.push(`Up to ${+x.upTo >= 60 ? (x.upTo / 60) + ' hr' + (x.upTo > 60 ? 's' : '') : x.upTo + ' min'}: ${money(x.price)}`));
       else { const inc = incOf(r); out.push(`${money(inc.price)} per ${inc.min === 60 ? 'hour' : inc.min + ' min'}`); }
-      if (+r.dailyMax > 0) out.push(`Daily max ${money(r.dailyMax)}${r.rolling ? ' per 24 hours' : ''}`);
+      if (+r.dailyMax > 0 && !flatDay) out.push(`Daily max ${money(r.dailyMax)}${r.rolling ? ' per 24 hours' : ''}`);
       (r.specials || []).filter(sp => sp.active !== false).forEach(sp => {
         const dd = (sp.days || []).map(Number), has = a => a.length === dd.length && a.every(d => dd.includes(d));
         const days = sp.dates && sp.dates.length ? sp.dates.join(', ') : has([0, 1, 2, 3, 4, 5, 6]) ? 'Every day' : has([1, 2, 3, 4, 5]) ? 'Mon–Fri' : has([0, 6]) ? 'Sat–Sun' : dd.map(d => dn[d]).join(', ');
-        out.push(`${sp.name}: ${money(sp.price)} · in ${t12(sp.enterFrom || '00:00')}–${t12(sp.enterUntil || '23:59')}${sp.exitBy ? ', out by ' + t12(sp.exitBy) + (sp.exitNextDay ? ' next day' : '') : ''}${days ? ' · ' + days : ''}`);
+        out.push(`${sp.name}: ${money(sp.price)}${sp.flat ? ' flat' : ''} · in ${t12(sp.enterFrom || '00:00')}–${t12(sp.enterUntil || '23:59')}${sp.exitBy ? ', out by ' + t12(sp.exitBy) + (sp.exitNextDay ? ' next day' : '') : ''}${days ? ' · ' + days : ''}`);
       });
       if (+r.graceMin > 0) out.push(`First ${r.graceMin} min free`);
       return out;
@@ -230,6 +243,15 @@
       return charge(facFor(s), s.startAt, end || s.endAt || now(), s.validation);
     }
     const needsReview = s => !!(s.matchedBy && !s.matchConfirmed);
+    /* What an open ticket can be paid at the entrance on an event night: the flat event price less anything already
+       paid, even inside the grace period, so attendants collect it as the car comes in. 0 when no flat event applies
+       (validated stays pay regular rates after their free time, so they are left to pay on exit). */
+    function entryDue(s) {
+      if (!s || s.endAt || s.mode === 'prepaid' || freeKind(s) || s.validation) return 0;
+      const ev = eventAt(facFor(s), s.startAt);
+      if (!ev || !ev.flat) return 0;
+      return Math.max(0, round2(+ev.price + extrasOf(s) + (+s.lateFee || 0) - paidOf(s)));
+    }
     const balanceOf = s => (s.waived || s.cited || (s.missedExit && !s.missedResolved) || needsReview(s)) ? 0 : Math.max(0, round2(sessionFee(s) + (+s.lateFee || 0) + extrasOf(s) - paidOf(s)));
     /* Full bill for a ticket: parking breakdown, extras, late fee, payments, balance, tax. */
     function ticketBill(s, end) {
@@ -246,6 +268,31 @@
     const occupancy = f => Math.max(0, Math.min(+f.capacity || Infinity, (+f.baseline || 0) + onSiteSessions(f).length));
     const permitValid = p => p.status === 'active' && (!p.endAt || p.endAt > now());
     const permitCovers = (p, facId) => { const t = ptype(p.permitTypeId); if (!t) return false; const fs = t.facilities || []; return !fs.length || fs.includes(facId); };
+    /* Spaces at a location right now, counting monthly parkers. Every active monthly parker holds a space at their
+       plan's location (its first location when a plan covers several), parked or not. A monthly car the cameras see
+       inside its own location is part of that hold, so it is not counted twice; any other car inside is a visitor.
+       available = capacity − visitors − monthly − count adjustment. */
+    const homeOf = p => { const t = ptype(p.permitTypeId); return (t && (t.facilities || [])[0]) || null; };
+    function spaceUse(f) {
+      const cap = +f.capacity || 0, adj = +f.baseline || 0, on = onSiteSessions(f);
+      const mine = new Set(L('permits').filter(p => permitValid(p) && homeOf(p) === f.id).map(p => p.id));
+      const monthlyInside = on.filter(s => s.kind === 'permit' && mine.has(s.permitId)).length;
+      const visitors = on.length - monthlyInside, monthly = mine.size, used = Math.max(0, visitors + monthly + adj);
+      return { capacity: cap, visitors, monthly, monthlyInside, adjustment: adj, used, available: Math.max(0, cap - used), pct: cap ? used / cap : 0 };
+    }
+    /* Cars that use the same validation code again and again: visits per code and plate over the last N days
+       (Settings; default 3 or more visits in 7 days). A flag for someone to review, never a refusal. */
+    function repeatValidations() {
+      const c = cfg(), min = Math.max(2, Math.round(+c.repeatValidationCount || 3)), days = Math.max(1, Math.round(+c.repeatValidationDays || 7)), since = now() - days * D;
+      const by = new Map();
+      L('sessions').forEach(s => {
+        const v = s.validation; if (!v || !v.code || !(s.startAt >= since) || !s.plate || s.noPlate) return;
+        const pl = normPlate(s.plate), k = v.code + '|' + pl;
+        const e = by.get(k) || { code: v.code, plate: pl, business: v.tenantName || v.department || v.name || '', sessions: [], last: 0 };
+        e.sessions.push(s.id); e.last = Math.max(e.last, s.startAt); by.set(k, e);
+      });
+      return [...by.values()].filter(e => e.sessions.length >= min).map(e => Object.assign(e, { count: e.sessions.length, days, min })).sort((a, b) => b.count - a.count || b.last - a.last);
+    }
     const permitsForPlate = pl => L('permits').filter(p => (p.plates || []).map(normPlate).includes(pl));
     const validPermitFor = (pl, facId) => L('permits').filter(permitValid).find(p => (p.plates || []).map(normPlate).includes(pl) && permitCovers(p, facId));
     const memberForPlate = pl => L('members').find(m => (m.plates || []).map(normPlate).includes(pl));
@@ -522,6 +569,9 @@
       if (s.endAt && s.fee != null && balanceOf(s) <= 0 && paidOf(s) > 0) return { error: 'This ticket is already paid in full. Refund it instead of validating it.' };
       const fv = findValidation(code, s.facilityId); if (fv.error) return fv;
       const v = fv.v, t = fv.t;
+      // On event nights only codes marked for event nights work; the rest are refused for that stay.
+      const ev = eventAt(facFor(s), s.startAt);
+      if (ev && !v.eventNights) return { error: 'This code doesn’t work on event nights (' + (ev.name || 'event') + ').' };
       const val = { code: v.code, name: v.name || '', type: v.type, value: v.value, department: v.department || (t ? t.name : ''), tenantId: t ? t.id : null, tenantName: t ? t.name : null, at: now(), source: source || 'portal', by: o.by || '' };
       const data = { validation: val, validationHistory: (s.validationHistory || []).concat([Object.assign({}, val, s.validation ? { replaced: s.validation.code, reason: String(o.reason || '') } : {})]).slice(-20),
         history: histAdd(s, { action: s.validation ? 'validation_replaced' : 'validation_applied', by: o.by, detail: (s.validation ? s.validation.code + ' → ' : '') + v.code + ' (' + validationText(v) + ')' + (o.reason ? ' · ' + o.reason : '') }) };
@@ -611,7 +661,7 @@
         if (!s) return { error: 'Ticket not found.' };
         if (s.endAt && s.missedExit && !s.missedResolved) return { error: 'Resolve the missed exit first (bill a day or close with no charge).' };
         if (needsReview(s)) return { error: 'Confirm the plate match first.' };
-        const due = balanceOf(s), amt = a.amount != null && a.amount !== '' ? round2(a.amount) : due;
+        const due = Math.max(balanceOf(s), entryDue(s)), amt = a.amount != null && a.amount !== '' ? round2(a.amount) : due;
         if (!(amt > 0)) return { error: 'Nothing is owed on this ticket.' };
         if (amt > due + 0.005) return { error: 'That is more than the ' + money(due) + ' owed.' };
         const t = now(), method = METHODS[a.method] ? a.method : 'cash';
@@ -630,6 +680,8 @@
             const cap = round2(paidOf(s) + amt - (+s.lateFee || 0) - extrasOf(s)), recent = charge(facFor(s), s.startAt, Math.max(s.startAt, t - 10 * M), s.validation);
             if (cd.fee > cap && cap >= recent - 0.005) { cd.feeQuoted = cd.fee; cd.fee = cap; }
           }
+          /* A staff member without manager rights can close a ticket only by collecting everything owed, so a token $1 can't be used to wave a car out. */
+          if (a.requireFull && !s.waived && round2((+cd.fee || 0) + extrasOf(s) + (+s.lateFee || 0) - paidOf(s) - amt) > 0.004) return { error: 'Only a manager or owner can close a ticket with money still owed. Collect the full amount, or ask a manager.' };
           Object.assign(data, cd); detail += ' · departed';
         }
         data.history = histAdd(s, { action: 'payment', by: a.by, detail });
@@ -644,6 +696,11 @@
         if (now() - at > 15 * M && !a.allowBackdate) return { error: 'A departure more than 15 minutes ago needs a manager (it changes the fee).' };
         const data = closeData(s, at);
         const bal = Math.max(0, round2(data.fee + extrasOf(s) + (+s.lateFee || 0) - paidOf(s)));
+        /* Letting a car out with money still owed is a manager or owner decision, and it always needs a reason. */
+        if (bal > 0 && !s.waived) {
+          if (!a.allowUnpaid) return { error: 'Only a manager or owner can let a car out with money owed. Collect the payment, apply a validation code, or ask a manager.' };
+          if (!String(a.reason || '').trim()) return { error: 'Give a reason for letting this car out unpaid (it is kept in the audit trail).' };
+        }
         data.history = histAdd(s, { action: 'departed', by: a.by, detail: (a.reason ? a.reason + ' · ' : '') + (bal > 0 && !s.waived ? money(bal) + ' left unpaid' : 'nothing owed') + (Math.abs(at - now()) > M ? ' · time set to ' + fmtLocal(at, fac(s.facilityId)) : '') });
         return { ops: [{ type: 'update', coll: 'sessions', id: s.id, data }], balance: s.waived ? 0 : bal };
       },
@@ -748,6 +805,7 @@
         const pl = normPlate(a.plate), f = fac(a.facilityId), t = now();
         if (!pl) return { error: 'Enter your license plate.' };
         if (!f || f.active === false) return { error: 'Choose where you are parked.' };
+        if (f.onlinePrepay === false) return { error: f.name + ' charges you when you leave, so there’s nothing to pay ahead.' };
         const live = liveForPlate(pl, f.id), from = live && live.paidUntil > t ? live.paidUntil : t, fx = live ? facFor(live) : f;
         let until;
         if (a.untilEndOfDay) until = nextDayStart(dayStart(from, fx), fx);
@@ -770,7 +828,8 @@
         const plates = String(a.plates || '').split(',').map(normPlate).filter(Boolean).slice(0, +plan.maxVehicles || 3);
         if (!name || !/.+@.+\..+/.test(email) || !plates.length) return { error: 'Add your name, email and at least one plate.' };
         if (L('permits').some(p => p.permitTypeId === plan.id && String(p.email || '').toLowerCase() === email && ['active', 'pending', 'waitlist', 'suspended'].includes(p.status) && !p.endAt)) return { error: 'You already have this monthly plan or are on its waitlist.' };
-        const full = +plan.quota && soldOf(plan) >= +plan.quota, number = String(10000 + Math.floor(Math.random() * 89999));
+        const full = +plan.quota && soldOf(plan) >= +plan.quota, number = newMonthlyNumber();
+        if (a.companyId) { const rm = accountRoom(a.companyId, plan.id, { adding: full ? 0 : 1 }); if (rm.error) return { error: rm.error }; const dup = plates.find(pl => permitsForPlate(pl).some(p => ['active', 'approved', 'pending', 'suspended'].includes(p.status) && (!p.endAt || p.endAt > now()))); if (dup) return { error: dup + ' is already on a monthly plan.' }; }
         const f = fac((plan.facilities || [])[0]) || L('facilities')[0], mb = monthBounds(now(), f);
         const first = full ? 0 : round2(+plan.price * (mb.end - now()) / (mb.end - mb.start));
         const data = { number, holder: name, email, phone: String(a.phone || ''), permitTypeId: plan.id, plates, status: full ? 'waitlist' : 'active', billing: a.companyId ? 'company' : 'card', companyId: a.companyId || null, companyName: a.companyName || '', accountId: a.accountId || null, createdAt: now(), startAt: full ? null : now(), endAt: null, paidThrough: full ? null : mb.end, source: a.source || 'portal', firstPaymentId: first > 0 && !a.companyId ? '__PAY__' : null };
@@ -872,6 +931,55 @@
     }
     /* First, partial month: the plan price times the share of the month left. */
     const prorate = plan => { const mb = monthBounds(now(), fac((plan.facilities || [])[0]) || L('facilities')[0]); return round2(+plan.price * (mb.end - now()) / (mb.end - mb.start)); };
+
+    /* ---------- accounts: a company, building or garage that manages its own block of monthly parkers ----------
+       An account can be tied to locations, limited to certain plans and capped at a number of parkers. These checks run on the
+       server for the console, spreadsheet imports, the account link and the driver portal, and again in the pilot page. */
+    const HOLDS_SPACE = ['active', 'suspended', 'approved', 'pending'];
+    const holdsSpace = p => HOLDS_SPACE.includes(p.status) && (!p.endAt || p.endAt > now());
+    /* A monthly number nobody else has. extra: numbers already handed out in the same batch (not saved yet). */
+    function newMonthlyNumber(extra) { const have = new Set(L('permits').map(p => String(p.number))); let n, k = 0; do { n = String(k++ < 40 ? 10000 + Math.floor(Math.random() * 89999) : 1000000 + Math.floor(Math.random() * 8999999)); } while (have.has(n) || (extra && extra.has(n))); if (extra) extra.add(n); return n; }
+    function accountUsed(companyId, excludeId) { let n = 0; for (const p of L('permits')) if (p.companyId === companyId && p.id !== excludeId && holdsSpace(p)) n++; return n; }
+    /* Can this account take `adding` more parkers on this plan? o.used lets a caller that is adding many keep its own running count. */
+    function accountRoom(companyId, planId, o) {
+      o = o || {}; const co = L('companies').find(c => c.id === companyId); if (!co) return {};
+      const plan = ptype(planId), max = +co.maxParkers || 0, used = o.used != null ? o.used : accountUsed(companyId, o.exclude), adding = o.adding == null ? 1 : o.adding;
+      const ids = Array.isArray(co.planIds) ? co.planIds : [], locs = Array.isArray(co.facilityIds) ? co.facilityIds : [], names = list => list.map(i => (ptype(i) || fac(i) || {}).name).filter(Boolean).join(', ');
+      if (plan && ids.length && !ids.includes(plan.id)) return { error: co.name + ' isn’t set up for the ' + plan.name + ' plan. Its plans: ' + (names(ids) || 'none') + '.', used, max };
+      if (plan && locs.length && (plan.facilities || []).length && !(plan.facilities || []).some(f => locs.includes(f))) return { error: 'The ' + plan.name + ' plan isn’t at ' + co.name + '’s location (' + names(locs) + ').', used, max };
+      if (max && adding > 0 && used + adding > max) return { error: co.name + ' is at its limit of ' + max + ' parker' + (max === 1 ? '' : 's') + ' (' + used + ' in use). Raise the limit on the account to add more.', used, max };
+      return { used, max, left: max ? Math.max(0, max - used) : null };
+    }
+    /* Add many parkers to one account at once (a pasted list or spreadsheet). Pure: returns what would be saved, row by row.
+       rows: [{ name, email, phone, plates, plan? }]; a.planId is the plan for rows that don't name one. a.prorate puts the rest of this
+       month on the account's next bill. a.staff lets the office use plans that aren't sold online. */
+    function planAccountParkers(a) {
+      const co = L('companies').find(c => c.id === a.companyId); if (!co) return { error: 'Account not found.' };
+      const rows = Array.isArray(a.rows) ? a.rows.slice(0, 1000) : [], norm = x => String(x || '').trim().toLowerCase(), created = [], skipped = [], ops = [];
+      const defPlan = a.planId ? ptype(a.planId) : null, taken = new Map(), numbers = new Set(), sold = {}; let used = accountUsed(co.id);
+      for (const p of L('permits')) { numbers.add(String(p.number)); if (['active', 'approved', 'pending', 'suspended'].includes(p.status) && (!p.endAt || p.endAt > now())) (p.plates || []).forEach(pl => taken.set(normPlate(pl), p.number)); }
+      const nextNumber = () => { let n, k = 0; do { n = String(k++ < 40 ? 10000 + Math.floor(Math.random() * 89999) : 1000000 + Math.floor(Math.random() * 8999999)); } while (numbers.has(n)); numbers.add(n); return n; };
+      rows.forEach((r, i) => {
+        const line = i + 1, holder = String(r.name || r.holder || '').trim().slice(0, 80), plates = [...new Set(String(r.plates || r.plate || '').split(/[,;|\s]+/).map(normPlate).filter(Boolean))];
+        const key = r.plan || r.planId || r.type, plan = key ? L('permitTypes').find(t => t.id === key || norm(t.name) === norm(key)) : defPlan;
+        if (!holder) return skipped.push({ line, reason: 'No name' });
+        if (!plates.length) return skipped.push({ line, reason: 'No license plate' });
+        if (!plan) return skipped.push({ line, reason: key ? 'Unknown plan “' + key + '”' : 'No plan chosen' });
+        if (!a.staff && plan.active === false) return skipped.push({ line, reason: plan.name + ' isn’t open for sign-up' });
+        const dup = plates.find(pl => taken.has(pl)); if (dup) return skipped.push({ line, reason: dup + ' is already on monthly #' + taken.get(dup) });
+        if (sold[plan.id] == null) sold[plan.id] = +plan.quota ? soldOf(plan) : 0;
+        const full = +plan.quota && sold[plan.id] >= +plan.quota, room = accountRoom(co.id, plan.id, { used, adding: full ? 0 : 1 });
+        if (room.error) return skipped.push({ line, reason: room.error });
+        const f = fac((plan.facilities || [])[0]) || L('facilities')[0], mb = monthBounds(now(), f), email = norm(r.email).slice(0, 200), number = nextNumber();
+        const data = { number, holder, email: /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email) ? email : '', phone: String(r.phone || '').trim().slice(0, 30), permitTypeId: plan.id, plates: plates.slice(0, +plan.maxVehicles || 3), companyId: co.id, companyName: co.name, billing: 'company', accountId: null,
+          status: full ? 'waitlist' : 'active', createdAt: now(), startAt: full ? null : now(), endAt: null, paidThrough: full ? null : mb.end, source: a.source || 'account', notes: String(r.notes || '').slice(0, 300) };
+        if (!full && a.prorate) data.prorateDue = round2(+plan.price * (mb.end - now()) / (mb.end - mb.start));
+        plates.forEach(pl => taken.set(pl, number)); if (full) sold[plan.id]++; else { sold[plan.id]++; used++; }
+        created.push({ line, holder, plates: data.plates, plan: plan.name, status: data.status, email: data.email });
+        ops.push({ type: 'set', coll: 'permits', id: uid('p'), data });
+      });
+      return { created, skipped, ops };
+    }
     const sessionByToken = tok => L('sessions').find(s => tok && s.extendToken === tok && !s.endAt);
 
     function lookup(plate) {
@@ -890,7 +998,7 @@
       };
     }
 
-    return { ROLES, ROLE_NAMES, METHODS, can, canonRole, ticketOf, ticketNo, snapRates, facFor, histAdd, endOfDate, ticketBill, extrasOf, freeKind, validPermitFor, vipForPlate, sessionsForCode, codeOccupancy, arAging, vehicleProfile, validationText, staleHours, TICKET, prorate, priceDetail, rateSummary, taxOf, specialQualifies, monthBounds, planMonthlyDue, sessionByToken, needsReview, cfg, plateDebt, isHot, hotList, planCollections, resAvailability, reservationFor, activeReservation, planNoShows, resActive, resPlates, M, H, D, normPlate, canon, uid, round2, money, sum, now, fac, ptype, tenant, camera, tzOf, dayStart, nextDayStart, charge, paidOf, sessionFee, balanceOf, isLive, onSiteSessions, occupancy, permitValid, permitCovers, permitsForPlate, memberForPlate, soldOf, unpaidSessions, exitStatus, findLive, planRead, checkPlate, findValidation, planApplyValidation, sessionsForTenant, concurrency, tenantDays, PORTAL, lookup, quote, liveForPlate };
+    return { newMonthlyNumber, accountRoom, accountUsed, planAccountParkers, ROLES, ROLE_NAMES, METHODS, can, canonRole, ticketOf, ticketNo, snapRates, facFor, histAdd, endOfDate, ticketBill, extrasOf, freeKind, validPermitFor, vipForPlate, sessionsForCode, codeOccupancy, arAging, vehicleProfile, validationText, staleHours, TICKET, prorate, priceDetail, rateSummary, taxOf, specialQualifies, monthBounds, planMonthlyDue, sessionByToken, needsReview, cfg, plateDebt, isHot, hotList, planCollections, resAvailability, reservationFor, activeReservation, planNoShows, resActive, resPlates, M, H, D, normPlate, canon, uid, round2, money, sum, now, fac, ptype, tenant, camera, tzOf, dayStart, nextDayStart, charge, paidOf, sessionFee, balanceOf, isLive, onSiteSessions, occupancy, spaceUse, homeOf, repeatValidations, isEvent, eventAt, entryDue, permitValid, permitCovers, permitsForPlate, memberForPlate, soldOf, unpaidSessions, exitStatus, findLive, planRead, checkPlate, findValidation, planApplyValidation, sessionsForTenant, concurrency, tenantDays, PORTAL, lookup, quote, liveForPlate };
   }
   Rules.normPlate = normPlate; Rules.ROLES = ROLES; Rules.ROLE_NAMES = ROLE_NAMES; Rules.can = can; Rules.canonRole = canonRole; Rules.METHODS = METHODS;
   if (typeof module !== 'undefined' && module.exports) module.exports = Rules; else root.ParkRules = Rules;

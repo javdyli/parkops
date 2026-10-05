@@ -26,7 +26,29 @@
   .safe{font-size:.82rem;color:var(--muted);border-left:3px solid var(--ok);padding-left:10px}
   .plans{display:grid;gap:10px;grid-template-columns:repeat(auto-fill,minmax(230px,1fr))}
   .plan{border:1px solid var(--line);border-radius:var(--r);padding:14px;display:grid;gap:6px;background:var(--surface)}
-  .plan b.p{font-size:1.4rem}`;
+  .plan b.p{font-size:1.4rem}
+  .presets{display:flex;gap:2px;background:var(--surface-2);border-radius:999px;padding:3px;flex-wrap:wrap}
+  .presets button{border:0;background:none;padding:6px 12px;border-radius:999px;font-weight:600;font-size:.86rem;color:var(--muted);cursor:pointer;white-space:nowrap}
+  .presets button[aria-pressed="true"]{background:var(--surface);color:var(--fg);box-shadow:var(--shadow)}
+  .daybar{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+  .daybar .range{font-weight:600}
+  .dim{opacity:.55;transition:opacity .15s;pointer-events:none}
+  .ch{display:grid;grid-template-columns:auto 1fr;grid-template-rows:170px auto;column-gap:8px;font-size:.74rem;color:var(--muted);padding:6px 4px 0}
+  .ch-y{position:relative;min-width:26px;text-align:right}
+  .ch-y span{position:absolute;right:0;transform:translateY(50%);line-height:1;font-variant-numeric:tabular-nums}
+  .ch-plot{position:relative;border-bottom:1px solid var(--line)}
+  .ch-plot .gl{position:absolute;left:0;right:0;height:0;border-top:1px solid var(--line);opacity:.55}
+  .ch-bars{position:absolute;inset:0;display:flex;align-items:flex-end}
+  .ch-col{flex:1 1 0;min-width:0;height:100%;display:flex;align-items:flex-end;justify-content:center;padding:0 1px}
+  .ch-col i{display:block;width:100%;max-width:24px;background:var(--accent);border-radius:4px 4px 0 0}
+  .ch-col:hover i{filter:brightness(1.18)}
+  .ch-col:hover{background:linear-gradient(var(--surface-2),var(--surface-2))}
+  .ch-x{display:flex;grid-column:2}
+  .ch-x span{flex:1 1 0;min-width:0;display:flex;justify-content:center;white-space:nowrap;padding-top:6px}
+  #chTip{position:fixed;z-index:60;background:var(--fg);color:var(--bg,#fff);padding:6px 10px;border-radius:6px;font-size:.8rem;line-height:1.35;white-space:pre-line;pointer-events:none;box-shadow:0 4px 14px rgba(0,0,0,.25);max-width:260px}
+  .daytbl tr[data-act] {cursor:pointer}.daytbl tr[data-act]:hover td{background:var(--surface-2)}
+  .kpis.sm .kpi b{font-size:1.55rem}
+  .skip-note{font-size:.84rem;color:var(--muted)}`;
   document.head.appendChild(css);
   /* The print area and printNow() are shared with the self-parking screens (tickets.js). */
   const printArea = document.getElementById('printArea') || (() => { const d = document.createElement('div'); d.id = 'printArea'; document.body.appendChild(d); return d; })();
@@ -169,13 +191,37 @@
     return inc.concat([1, 2, 3, 4, 6, 8]);
   }
   const hLabel = h => h < 1 ? Math.round(h * 60) + ' min' : h + ' hr' + (h > 1 ? 's' : '');
+  /* Locations drivers can pay ahead for: open to drivers and not a pay-on-exit garage. */
+  const prepayFacs = () => S.facilities.filter(f => f.active !== false && f.onlinePrepay !== false);
+  /* The duration buttons a location shows (Locations → Pay buttons): 'standard' = hours, then All day;
+     'cap' = hours until the price reaches the daily maximum, then one "N+ hrs" button that pays for the rest of the
+     parking day; 'allday' = a single All day price (flat-rate lots). */
+  function durButtons(f) {
+    const mode = (f && f.payButtons) || 'standard';
+    if (mode === 'allday') return [{ v: 'eod', label: 'All day' }];
+    const hrs = durOptions(f).map(h => ({ v: h, label: hLabel(h) })), max = +((f && f.rates) || {}).dailyMax || 0;
+    if (mode === 'cap' && max > 0) {
+      const t = Date.now(), free = Object.assign({}, f, { rates: Object.assign({}, f.rates, { graceMin: 0 }) });
+      const i = hrs.findIndex(x => R.charge(free, t, t + x.v * 3600e3) >= max - 0.004);
+      if (i >= 0) return hrs.slice(0, i).concat([{ v: 'eod', label: hrs[i].label.replace(/ (hrs?|min)$/, '') + '+ ' + (hrs[i].v < 1 ? 'min' : 'hrs') }]);
+    }
+    return hrs.concat([{ v: 'eod', label: 'All day' }]);
+  }
+  /* The choice in effect for a location: the driver's pick when that button exists, else the nearest one. */
+  function ppChoice(f) {
+    const btns = durButtons(f), pp = UI.pp, nums = btns.filter(b => b.v !== 'eod');
+    if (pp.eod && btns.some(b => b.v === 'eod')) return { eod: true, hours: 0 };
+    if (!pp.eod && nums.some(b => b.v === pp.hours)) return { eod: false, hours: pp.hours };
+    if (!nums.length || (pp.hours > nums[nums.length - 1].v && btns.some(b => b.v === 'eod'))) return { eod: true, hours: 0 };
+    return { eod: false, hours: (nums.find(b => b.v === 2) || nums[0]).v };
+  }
   function prepayForm(f, opts) {
     const o = opts || {}, pp = UI.pp, sms = HX.sms && HX.sms.enabled, locked = o.plate;
-    const facs = o.fixed ? null : S.facilities;
+    const facs = o.fixed ? null : prepayFacs(), ch = ppChoice(f);
     return `<form class="panel-b" data-form="prepayH" style="display:grid;gap:14px">
       ${locked ? `<div class="field"><label>License plate</label><div class="plate" style="font-size:1.2rem;justify-self:start">${esc(locked)}</div></div>` : plateField('pPlate', 'License plate', pp.plate != null ? pp.plate : (acctPlates()[0] || lastPlate()))}
       ${facs ? `<div class="field"><label for="pFac">Where are you parked?</label><select id="pFac">${facs.map(x => `<option value="${x.id}" ${x.id === (f && f.id) ? 'selected' : ''}>${esc(x.name)}${x.lotCode ? ' · Lot ' + esc(x.lotCode) : ''}</option>`).join('')}</select></div>` : ''}
-      <div class="field"><label>${o.extend ? 'Add how much time?' : 'How long?'}</label><div class="durs">${durOptions(f).map(h => `<button type="button" data-act="ppDur" data-v="${h}" aria-pressed="${!pp.eod && pp.hours === h}">${hLabel(h)}</button>`).join('')}<button type="button" data-act="ppDur" data-v="eod" aria-pressed="${!!pp.eod}">All day</button></div></div>
+      <div class="field"><label>${o.extend ? 'Add how much time?' : 'How long?'}</label><div class="durs">${durButtons(f).map(b => `<button type="button" data-act="ppDur" data-v="${b.v}" aria-pressed="${b.v === 'eod' ? ch.eod : !ch.eod && ch.hours === b.v}">${b.label}</button>`).join('')}</div></div>
       <div class="owed" style="border-color:var(--line);background:var(--surface-2)"><div><div class="quote" id="pQuote">—</div><div class="note" id="pUntil"></div></div><button class="btn pri lg" id="pGo">Continue to payment</button></div>
       ${sms ? `<div class="form-grid"><div class="field"><label for="pPhone">Mobile number (optional)</label><input id="pPhone" type="tel" autocomplete="tel" value="${esc(pp.phone != null ? pp.phone : ((HX.account && HX.account.phone) || lastPhone()))}"></div>
         <div class="field" style="align-self:end"><label class="checks" style="display:flex"><label><input type="checkbox" id="pSms" ${pp.sms === false ? '' : 'checked'}> Text me a receipt and a reminder 15 minutes before time runs out</label></label></div></div>
@@ -187,10 +233,10 @@
     const el = $('#pQuote'); if (!el) return;
     const facId = ($('#pFac') || {}).value || UI.ppFac, plate = normPlate((($('#pPlate') || {}).value) || (UI.extendInfo && UI.extendInfo.plate) || '');
     if (!facId) return;
-    const pp = UI.pp, seq = ++qSeq;
+    const ch = ppChoice(facById(facId)), seq = ++qSeq;
     clearTimeout(qT); qT = setTimeout(async () => {
       try {
-        const q = await api('GET', `/api/portal/quote?facilityId=${encodeURIComponent(facId)}&hours=${pp.eod ? 0 : pp.hours}&untilEndOfDay=${pp.eod ? 1 : 0}&plate=${encodeURIComponent(plate)}`);
+        const q = await api('GET', `/api/portal/quote?facilityId=${encodeURIComponent(facId)}&hours=${ch.eod ? 0 : ch.hours}&untilEndOfDay=${ch.eod ? 1 : 0}&plate=${encodeURIComponent(plate)}`);
         if (seq !== qSeq) return; UI.ppQuote = q;
         const f = facById(facId), tz = R.tzOf(f);
         $('#pQuote').textContent = q.amount > 0 ? money(q.total) : 'Covered';
@@ -200,7 +246,7 @@
     }, 200);
   }
   function startPrepay(fixedFac, extend) {
-    const facId = fixedFac || ($('#pFac') || {}).value, f = facById(facId), pp = UI.pp;
+    const facId = fixedFac || ($('#pFac') || {}).value, f = facById(facId), pp = ppChoice(f);
     const plate = normPlate(extend ? UI.extendInfo.plate : ($('#pPlate') || {}).value);
     if (!plate) { toast('Enter your license plate.', true); return; }
     if (!f) { toast('Choose where you’re parked.', true); return; }
@@ -214,10 +260,10 @@
 
   /* ---------- portal pages ---------- */
   function vHome() {
-    const first = S.facilities[0];
+    const list = prepayFacs(), first = list[0], cur = facById(($('#pFac') || {}).value), exitOnly = S.facilities.filter(f => f.active !== false && f.onlinePrepay === false);
     return `<div class="grid g2e">
-    <section class="panel"><div class="panel-h"><h2>Pay to park</h2></div>${first ? prepayForm(facById(($('#pFac') || {}).value) || first) : '<div class="empty">No parking locations yet.</div>'}
-      <p class="note" style="margin:0 16px 16px">Garages with cameras bill automatically when you leave, so prepaying is optional there. Lots with a pay sign need payment before you walk away.</p></section>
+    <section class="panel"><div class="panel-h"><h2>Pay to park</h2></div>${first ? prepayForm(cur && list.includes(cur) ? cur : first) : '<div class="empty">No parking locations take payment ahead.</div>'}
+      <p class="note" style="margin:0 16px 16px">${exitOnly.length ? `${esc(exitOnly.map(f => f.name).join(', '))} charge${exitOnly.length > 1 ? '' : 's'} you when you leave, so there’s nothing to pay ahead there. ` : 'Garages with cameras bill automatically when you leave, so prepaying is optional there. '}Lots with a pay sign need payment before you walk away.</p></section>
     <section class="panel"><div class="panel-h"><h2>Look up a plate</h2></div><div class="panel-b" style="display:grid;gap:12px">
       <form data-form="lookup" class="row"><div class="field"><label for="lkPlate">License plate</label><input id="lkPlate" autocomplete="off" style="text-transform:uppercase" placeholder="ABC1234" value="${esc(UI.lookup)}" data-fresh="1"></div><button class="btn">Look up</button></form>
       ${UI.lookupData ? lookupHosted(UI.lookupData) : '<p class="note" style="margin:0">See balances, citations, monthly parking and reservations for a plate.</p>'}</div></section>
@@ -287,7 +333,7 @@
     <div class="panel-b" style="display:grid;gap:14px"><div class="plans">${plans.map(t => { const left = +t.quota ? Math.max(0, t.quota - (t.sold || 0)) : null; return `<div class="plan"><span class="tag" style="justify-self:start">${t.kind === 'reserved' ? 'Reserved space' : 'Unreserved'}</span><b>${esc(t.name)}</b><b class="p num">${money(t.price)}<span class="muted" style="font-size:.85rem;font-weight:500">/month</span></b><span class="muted" style="font-size:.85rem">${esc(fnames(t))} · up to ${t.maxVehicles || 3} vehicles</span><span class="note">${left === 0 ? 'Full: join the waitlist' : left != null ? left + ' spots left' : 'Spots available'}</span></div>`; }).join('')}</div>
     ${!a ? `<div class="owed" style="border-color:var(--line);background:var(--surface-2)"><span>Sign in or create an account to start. Monthly parking is billed to the card on your account.</span><button class="btn pri" data-act="pv" data-v="account">Sign in or create account</button></div>`
       : !a.card ? `<div class="owed"><span>Add a card to your account first. It’s charged on the 1st of each month.</span><button class="btn pri" data-act="addCard">Add a card</button></div>`
-      : `<form data-form="monthlyH" style="display:grid;gap:12px"><div class="form-grid"><div class="field"><label for="moPlan">Plan</label><select id="moPlan">${plans.map(t => `<option value="${t.id}">${esc(t.name)} · ${money0(t.price)}/mo</option>`).join('')}</select></div>
+      : `<form data-form="monthlyH" style="display:grid;gap:12px"><div class="form-grid"><div class="field"><label for="moPlan">Plan</label><select id="moPlan">${plans.map(t => `<option value="${t.id}">${esc(t.name)} · ${moneyP(t.price)}/mo</option>`).join('')}</select></div>
         <div class="field"><label for="moPlates">License plates</label><input id="moPlates" style="text-transform:uppercase" value="${esc(acctPlates().join(', '))}"><div class="help">One car parks at a time.</div></div>
         <div class="field"><label for="moPhone">Mobile (for billing alerts)</label><input id="moPhone" type="tel" value="${esc(a.phone || '')}"></div></div>
         <div class="row"><button class="btn pri lg">Start monthly parking</button><span class="note">Charged to ${esc(a.card.brand || 'card')} ending ${esc(a.card.last4)}.</span></div></form>`}
@@ -344,19 +390,24 @@
     const d = lazy('companyData', '/api/company/' + UI.companyToken);
     if (!d) return '<section class="panel"><div class="empty">Loading…</div></section>';
     if (d.error) return `<section class="panel"><div class="empty">${esc(d.error)}</div></section>`;
-    const c = d.company, emp = d.employees || [], active = emp.filter(e => ['active', 'suspended'].includes(e.status));
+    const c = d.company, all = d.employees || [], active = all.filter(e => ['active', 'suspended'].includes(e.status));
+    const eq = (UI.coEq || '').trim().toLowerCase(), eqp = normPlate(eq), emp0 = eq ? all.filter(e => (e.holder || '').toLowerCase().includes(eq) || (e.email || '').toLowerCase().includes(eq) || String(e.number).includes(eq) || (eqp && (e.plates || []).some(x => normPlate(x).includes(eqp)))) : all;
+    if (UI.coEqKey !== eq) { UI.coEqKey = eq; UI.coEPage = 0; }
+    const EP = 50, epg = Math.min(UI.coEPage || 0, Math.max(0, Math.ceil(emp0.length / EP) - 1)), emp = emp0.slice(epg * EP, epg * EP + EP), full = c.max && c.left === 0;
     const ipill = st => `<span class="pill ${({ PAID: 'ok', UNPAID: 'warn', SCHEDULED: 'info' })[st] || ''}">${esc(String(st || '').replace('_', ' ').toLowerCase())}</span>`;
-    return `<div class="pagehead"><div><h1 style="font-size:1.7rem">${esc(c.name)}</h1><p>Monthly parking for your employees · ${active.length} active · billed ${c.billing === 'invoice' ? 'by Square invoice' : 'to the company card'} on the 1st</p></div></div>
+    return `<div class="pagehead"><div><h1 style="font-size:1.7rem">${esc(c.name)}</h1><p>Monthly parking for your employees · ${active.length.toLocaleString()} active${c.max ? ` of ${c.max.toLocaleString()} allowed` : ''}${(c.locations || []).length ? ' · ' + esc(c.locations.join(', ')) : ''} · billed ${c.billing === 'invoice' ? 'by Square invoice' : 'to the company card'} on the 1st</p></div></div>
     ${UI.receipt ? `<div class="receipt" role="status"><b>${esc(UI.receipt.title)}</b><br>${esc(UI.receipt.body)}</div>` : ''}
     ${c.billing === 'card' ? `<section class="panel"><div class="panel-h"><h2>Company card</h2></div><div class="panel-b row" style="justify-content:space-between;align-items:center">${c.card ? `<span><b>${esc(c.card.brand || 'Card')}</b> ending ${esc(c.card.last4)} · exp ${esc(c.card.exp || '')}</span>` : '<span class="pill warn">No card on file. Add one so employees’ parking stays active.</span>'}<button class="btn ${c.card ? '' : 'pri'}" data-act="companyCard">${c.card ? 'Replace card' : 'Add a card'}</button></div></section>` : ''}
-    <section class="panel"><div class="panel-h"><h2>Employees</h2></div>
-      ${emp.length ? `<div class="tbl-wrap"><table><thead><tr><th>Name</th><th>Plan</th><th>Plates</th><th>Status</th><th></th></tr></thead><tbody>${emp.map(e => `<tr><td><b>${esc(e.holder)}</b><span class="sub">${esc(e.email || '')} · #${esc(e.number)}</span></td><td>${esc(e.plan || '')}</td><td><div class="plates">${(e.plates || []).map(p => `<span class="plate">${esc(p)}</span>`).join('')}</div></td><td>${permitPill({ status: e.status, endAt: e.endAt })}</td><td>${!e.endAt ? `<button class="btn sm" data-act="companyCancel" data-id="${esc(e.id)}" data-name="${esc(e.holder)}">Remove</button>` : ''}</td></tr>`).join('')}</tbody></table></div>` : '<div class="empty">No employees yet.</div>'}</section>
-    <section class="panel"><div class="panel-h"><h2>Add an employee</h2></div><form class="panel-b" data-form="companyAdd" style="display:grid;gap:12px">
+    ${d.employeeTotal > all.length ? `<div class="callout warn">Showing the first ${all.length.toLocaleString()} of ${d.employeeTotal.toLocaleString()} employees. Ask the parking office for the full list.</div>` : ''}
+    ${full ? `<div class="callout warn"><b>You’re at your limit of ${c.max.toLocaleString()} parkers.</b> Remove someone to make room, or ask the parking office to raise the limit.</div>` : ''}
+    <section class="panel"><div class="panel-h"><h2>Employees</h2><div class="row">${all.length > 8 ? `<input id="coEq" type="search" placeholder="Find someone" value="${esc(UI.coEq || '')}" data-fresh="1" style="width:180px">` : ''}${full ? '' : '<button class="btn sm" data-act="companyBulk">Add several at once</button>'}</div></div>
+      ${emp.length ? `<div class="tbl-wrap"><table><thead><tr><th>Name</th><th>Plan</th><th>Plates</th><th>Status</th><th></th></tr></thead><tbody>${emp.map(e => `<tr><td><b>${esc(e.holder)}</b><span class="sub">${esc(e.email || '')} · #${esc(e.number)}</span></td><td>${esc(e.plan || '')}</td><td><div class="plates">${(e.plates || []).map(p => `<span class="plate">${esc(p)}</span>`).join('')}</div></td><td>${permitPill({ status: e.status, endAt: e.endAt })}</td><td>${!e.endAt ? `<button class="btn sm" data-act="companyCancel" data-id="${esc(e.id)}" data-name="${esc(e.holder)}">Remove</button>` : ''}</td></tr>`).join('')}</tbody></table></div>${pager('coEPage', epg, EP, emp0.length)}` : `<div class="empty">${eq ? 'Nobody matches.' : 'No employees yet.'}</div>`}</section>
+    ${full ? '' : `<section class="panel"><div class="panel-h"><h2>Add an employee</h2></div><form class="panel-b" data-form="companyAdd" style="display:grid;gap:12px">
       <div class="form-grid"><div class="field"><label for="ceName">Name</label><input id="ceName"></div><div class="field"><label for="ceEmail">Email</label><input id="ceEmail" type="email"></div>
       <div class="field"><label for="cePhone">Mobile (optional)</label><input id="cePhone" type="tel"></div>
-      <div class="field"><label for="cePlan">Plan</label><select id="cePlan">${d.plans.map(p => `<option value="${esc(p.id)}">${esc(p.name)} · ${money0(p.price)}/mo${p.left === 0 ? ' · waitlist' : ''}</option>`).join('')}</select></div>
+      <div class="field"><label for="cePlan">Plan</label><select id="cePlan">${d.plans.map(p => `<option value="${esc(p.id)}">${esc(p.name)} · ${moneyP(p.price)}/mo${p.left === 0 ? ' · waitlist' : ''}</option>`).join('')}</select></div>
       <div class="field span"><label for="cePlates">License plates</label><input id="cePlates" style="text-transform:uppercase" placeholder="ABC1234, XYZ987"></div></div>
-      <div><button class="btn pri">Add employee</button></div><p class="note" style="margin:0">The rest of this month is prorated onto your next bill. Removing someone ends their parking at the end of the paid month.</p></form></section>
+      <div><button class="btn pri">Add employee</button></div><p class="note" style="margin:0">The rest of this month is prorated onto your next bill. Removing someone ends their parking at the end of the paid month.${c.max ? ` You can add up to ${(c.left || 0).toLocaleString()} more.` : ''}</p></form></section>`}
     ${(d.invoices || []).length ? `<section class="panel"><div class="panel-h"><h2>Invoices</h2></div><div class="tbl-wrap"><table><thead><tr><th>Month</th><th class="r">Amount</th><th>Due</th><th>Status</th><th></th></tr></thead><tbody>${d.invoices.map(i => `<tr><td class="num">${esc(i.period)}</td><td class="r num">${money(i.amount)}</td><td class="num">${esc(i.dueDate || '')}</td><td>${ipill(i.status)}</td><td>${i.publicUrl && i.status !== 'PAID' ? `<a class="btn sm pri" href="${esc(i.publicUrl)}" target="_blank" rel="noopener">Pay</a>` : i.publicUrl ? `<a class="btn sm" href="${esc(i.publicUrl)}" target="_blank" rel="noopener">View</a>` : ''}</td></tr>`).join('')}</tbody></table></div></section>` : ''}
     <p class="note">This page is private to ${esc(c.name)}. Don’t share the link outside your company.</p>`;
   }
@@ -405,6 +456,23 @@
       payDialog({ title: 'Company card', store: true, submit: 'Save card', summary: 'Monthly parking for your employees is charged to this card on the 1st. It’s stored securely by Square.', onPay: async payment => {
         try { await api('POST', '/api/company/' + UI.companyToken + '/card', payment); UI.companyData = undefined; toast('Card saved'); render(); return { ok: true }; } catch (e) { return { error: e.message }; }
       } });
+    },
+    companyBulk() {
+      const d = UI.companyData; if (!d || d.error) return; const plans = d.plans || [], c = d.company; let parsed = null;
+      if (!plans.length) { toast('No plan is open to your account yet. Ask the parking office.', true); return; }
+      dlgCfg = null;
+      dlgForm.innerHTML = `<div class="dlg-h"><h2>Add several employees</h2><button type="button" class="btn sm" data-dlg="close">Close</button></div>
+        <div class="dlg-b" style="display:grid;gap:12px"><p class="note" style="margin:0">Paste one person per line: <b>name, email, plates, phone</b>. Several plates: separate with a semicolon. ${c.max ? `You can add up to <b>${(c.left || 0).toLocaleString()}</b> more.` : ''} The rest of this month is added to your next bill.</p>
+          <div class="field"><label for="cbPlan">Plan</label><select id="cbPlan">${plans.map(p => `<option value="${esc(p.id)}">${esc(p.name)} · ${moneyP(p.price)}/mo${p.left === 0 ? ' · waitlist' : ''}</option>`).join('')}</select></div>
+          <div class="field"><label for="cbText">The list</label><textarea id="cbText" rows="7" placeholder="Ana Reyes, ana@example.com, ABC1234, 817-555-0100&#10;Ben Ortiz, ben@example.com, XYZ987;QRS456"></textarea></div>
+          <div id="cbPrev"></div><p id="cbErr" class="pill bad" hidden></p></div>
+        <div class="dlg-f"><button type="button" class="btn" data-dlg="close">Cancel</button><button type="button" class="btn" id="cbCheck">Preview</button><button type="button" class="btn pri" id="cbGo" disabled>Add</button></div>`;
+      dlg.showModal();
+      const err = m => { const e = $('#cbErr', dlgForm); e.textContent = m || ''; e.hidden = !m; };
+      const show = (r, dry) => { $('#cbPrev', dlgForm).innerHTML = `<div class="split"><span><b>${r.created.length.toLocaleString()}</b> ${dry ? 'ready to add' : 'added'}</span><span><b>${r.skipped.length.toLocaleString()}</b> skipped</span></div>${r.skipped.length ? `<div class="imp-prev"><table><thead><tr><th>Line</th><th>Why it was skipped</th></tr></thead><tbody>${r.skipped.slice(0, 100).map(x => `<tr><td class="num">${x.line}</td><td>${esc(x.reason)}</td></tr>`).join('')}</tbody></table></div>` : ''}`; };
+      const call = dry => api('POST', '/api/company/' + UI.companyToken + '/parkers', { planId: $('#cbPlan', dlgForm).value, rows: parsed, dryRun: dry });
+      $('#cbCheck', dlgForm).onclick = async () => { err(''); try { parsed = window.parseParkerList($('#cbText', dlgForm).value); if (!parsed.length) throw new Error('Paste at least one person.'); if (parsed.length > 300) throw new Error('Up to 300 people at a time. Split the list in two.'); const r = await call(true); show(r, true); const g = $('#cbGo', dlgForm); g.disabled = !r.created.length; g.textContent = r.created.length ? `Add ${r.created.length.toLocaleString()}` : 'Add'; } catch (e) { err(e.message); } };
+      $('#cbGo', dlgForm).onclick = async () => { if (!parsed) return; err(''); const g = $('#cbGo', dlgForm); g.disabled = true; try { const r = await call(false); show(r, false); UI.companyData = undefined; toast(`${r.created.length.toLocaleString()} added`); g.textContent = 'Done'; g.onclick = () => dlg.close(); g.disabled = false; $('#cbCheck', dlgForm).hidden = true; render(); } catch (e) { err(e.message); g.disabled = false; } };
     },
     companyCancel(b) { confirmBox('Remove employee', `Remove ${esc(b.dataset.name)}? Their parking stays active through the end of the paid month and isn’t billed again.`, 'Remove', async () => { try { const r = await api('POST', `/api/company/${UI.companyToken}/employees/${b.dataset.id}/cancel`); UI.companyData = undefined; UI.receipt = r.receipt; render(); return true; } catch (e) { return e.message; } }); },
   });
@@ -519,18 +587,45 @@
     line(noticeLegal(), 18, { lines: 6, gap: 4 }); y += 30;
     return `^XA^CI28^PW${W + 16}^LL${y}^LH0,0\n${z}^XZ`;
   }
-  async function btWrite(zpl) {
-    if (!navigator.bluetooth) throw new Error('This browser can’t reach Bluetooth printers. Use Chrome on an Android phone, or use the print dialog button.');
-    if (!bt.device) bt.device = await navigator.bluetooth.requestDevice({ filters: [{ services: [ZSVC] }, { namePrefix: 'XX' }, { namePrefix: 'ZQ' }, { namePrefix: 'Zebra' }], optionalServices: [ZSVC] });
-    if (!bt.device.gatt.connected || !bt.ch) { const server = await bt.device.gatt.connect(); bt.ch = await (await server.getPrimaryService(ZSVC)).getCharacteristic(ZWRITE); }
-    const data = new TextEncoder().encode(zpl);
-    for (let i = 0; i < data.length; i += bt.chunk) {
-      const part = data.slice(i, i + bt.chunk);
-      try { if (bt.ch.writeValueWithoutResponse) await bt.ch.writeValueWithoutResponse(part); else await bt.ch.writeValue(part); }
-      catch (e) { if (bt.chunk > 20) { bt.chunk = 20; i = -bt.chunk; continue; } throw e; }
-      await new Promise(r => setTimeout(r, 12));
+  /* ---------- the Bluetooth printer (shared with the live scanner) ----------
+     Chrome on Android and the free Bluefy browser on iPhone/iPad can talk to Bluetooth Low Energy printers. Safari on iPhone/iPad can't:
+     it has no Bluetooth access at all. Pairing needs a tap; after that the printer reconnects by itself. */
+  const IOS = /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  const btListeners = [];
+  const btChanged = () => btListeners.forEach(fn => { try { fn(); } catch (e) {} });
+  const noBluetooth = () => new Error(IOS ? 'Safari on iPhone and iPad can’t print to Bluetooth printers. Open ParkOps in the free Bluefy app instead.' : 'This browser can’t reach Bluetooth printers. Use Chrome on Android, or Bluefy on iPhone and iPad.');
+  const btLive = () => !!(bt.device && bt.ch && bt.device.gatt && bt.device.gatt.connected);
+  async function btConnect(opts) {
+    if (!navigator.bluetooth) throw noBluetooth();
+    if (!bt.device) { // choosing a printer has to start from a tap
+      const all = opts && opts.all;
+      bt.device = await navigator.bluetooth.requestDevice(all ? { acceptAllDevices: true, optionalServices: [ZSVC] }
+        : { filters: [{ services: [ZSVC] }, { namePrefix: 'XX' }, { namePrefix: 'ZQ' }, { namePrefix: 'Zebra' }], optionalServices: [ZSVC] });
+      bt.device.addEventListener('gattserverdisconnected', () => { bt.ch = null; btChanged(); });
     }
+    if (!btLive()) {
+      try { const server = await bt.device.gatt.connect(); bt.ch = await (await server.getPrimaryService(ZSVC)).getCharacteristic(ZWRITE); }
+      catch (e) { bt.ch = null; if (e.name === 'NotFoundError') { bt.device = null; throw new Error('That device isn’t a Zebra printer ParkOps can print to. Pick the printer again.'); } throw e; }
+    }
+    bt.name = bt.device.name || 'Zebra printer'; btChanged();
   }
+  async function btWrite(zpl, retried) {
+    if (!btLive()) await btConnect();
+    const data = new TextEncoder().encode(zpl);
+    try {
+      for (let i = 0; i < data.length; i += bt.chunk) {
+        const part = data.slice(i, i + bt.chunk);
+        try { if (bt.ch.writeValueWithoutResponse) await bt.ch.writeValueWithoutResponse(part); else await bt.ch.writeValue(part); }
+        catch (e) { if (bt.chunk > 20) { bt.chunk = 20; i = -bt.chunk; continue; } throw e; }
+        await new Promise(r => setTimeout(r, 12));
+      }
+    } catch (e) { bt.ch = null; if (!retried && bt.device) { await new Promise(r => setTimeout(r, 400)); return btWrite(zpl, true); } throw e; } // the printer slept or dropped: reconnect once and send the whole label again
+  }
+  function testZpl() {
+    const inch = +((S.config || {}).printerWidth) || 3, W = Math.round(inch * 203) - 16;
+    return `^XA^CI28^PW${W + 16}^LL260^LH0,0\n^FO8,20^A0N,36,36^FB${W - 16},1,4,C,0^FDParkOps printer test^FS\n^FO8,70^A0N,26,26^FB${W - 16},1,4,C,0^FD${zsafe(campusName())}^FS\n^FO8,110^GB${W - 16},3,3^FS\n^FO8,125^A0N,24,24^FB${W - 16},2,4,C,0^FD${zsafe(new Date().toLocaleString('en-US'))} · ${inch} inch paper^FS\n^XZ`;
+  }
+  window.printerKit = { supported: () => !!navigator.bluetooth, ios: IOS, connected: btLive, name: () => (btLive() ? bt.name : ''), remembered: () => !!bt.device, connect: btConnect, send: btWrite, test: () => btWrite(testZpl()), onChange: fn => { btListeners.push(fn); }, zpl: () => citationZpl };
   const printNow = (html, page) => window.printNow(html, page);
   function printHtml(c) {
     const cfg = S.config || {}, f = facById(c.facilityId), due = new Date(c.issuedAt + (+cfg.citationDueDays || 14) * 864e5), url = siteBase() + '/c/' + c.number;
@@ -542,12 +637,25 @@
   }
   /* Private operators in Texas issue parking charges under the terms posted at the entrance, not government citations. */
   const noticeLegal = () => `This is a private parking charge notice issued by ${campusName()} under the terms posted at this facility. It is not a government citation and does not affect your driving record. Pay or dispute it online within ${(S.config || {}).citationDueDays || 14} days.`;
+  /* What to do when this browser has no Bluetooth (Safari on iPhone and iPad). */
+  window.printHelpDialog = () => {
+    const url = location.origin + '/';
+    openForm({ title: IOS ? 'Printing from iPhone or iPad' : 'Printing to a Zebra printer', body: `<div style="display:grid;gap:12px">
+      <p style="margin:0">${IOS ? 'Safari on iPhone and iPad can’t connect to Bluetooth printers. Apple doesn’t let websites in Safari use Bluetooth.' : 'This browser can’t connect to Bluetooth printers.'} The fix takes a minute and is free:</p>
+      <ol style="margin:0;padding-left:20px;display:grid;gap:6px"><li>${IOS ? 'Install <b>Bluefy</b> from the App Store (a free browser made for Bluetooth devices).' : 'Use <b>Chrome</b> on an Android phone or tablet.'}</li>
+      <li>${IOS ? 'Open Bluefy, paste the ParkOps address below, and sign in.' : 'Open ParkOps there and sign in.'}</li><li>Turn the Zebra printer on, then tap <b>Connect printer</b> and pick it from the list. Do this once each shift.</li></ol>
+      <div class="row"><input readonly value="${esc(url)}" style="flex:1;min-width:0" aria-label="ParkOps address"><button type="button" class="btn" data-hp="copy">Copy address</button></div>
+      <p class="note" style="margin:0">Needs a Zebra mobile printer with Bluetooth Low Energy (ZQ220, ZQ320, ZQ510, ZQ520, ZQ610, ZQ620 and newer). The camera works in Bluefy too, so the officer can scan and print in the same app. In the meantime <b>Print dialog</b> sends the notice to any AirPrint printer.</p></div>`, submit: 'Done', fields: [], onSubmit: () => true });
+    const cancel = dlgForm.querySelector('[data-dlg=close]:not(.sm)'); if (cancel) cancel.hidden = true;
+  };
+  dlgForm.addEventListener('click', async e => { const b = e.target.closest('[data-hp=copy]'); if (!b) return; try { await navigator.clipboard.writeText(location.origin + '/'); toast('Address copied'); } catch (x) { const i = b.previousElementSibling; if (i) { i.select(); toast('Select and copy the address'); } } });
   window.printPanel = c => `<section class="panel"><div class="panel-h"><h3>Notice ${esc(c.number)} issued</h3><span class="pill bad">${money(c.fine)}</span></div><div class="panel-b" style="display:grid;gap:10px">
-    <div class="row"><button class="btn pri lg" data-act="printBT" data-id="${c.id}">Print on Zebra (Bluetooth)</button><button class="btn lg" data-act="printSys" data-id="${c.id}">Print dialog</button><button class="btn" data-act="doneCite">Done</button></div>
-    <p class="note" style="margin:0">Bluetooth printing works in Chrome on Android. The first time, pick your printer from the list; it’s remembered until you close the page. The notice has a QR code that opens the pay and dispute page, and says it is a private notice, not a government citation.</p>
+    <div class="row">${navigator.bluetooth ? `<button class="btn pri lg" data-act="printBT" data-id="${c.id}">Print on Zebra (Bluetooth)</button>` : `<button class="btn pri lg" data-act="printHelp">Print on Zebra: how${IOS ? ' on iPhone/iPad' : ''}</button>`}<button class="btn lg" data-act="printSys" data-id="${c.id}">Print dialog</button><button class="btn" data-act="doneCite">Done</button></div>
+    <p class="note" style="margin:0">${navigator.bluetooth ? 'The first time, pick your printer from the list; it’s remembered until you close the page.' : IOS ? 'Safari on iPhone and iPad can’t reach Bluetooth printers. Tap the button for the quick fix (a free app called Bluefy).' : 'This browser can’t reach Bluetooth printers.'} The notice has a QR code that opens the pay and dispute page, and says it is a private notice, not a government citation.</p>
     ${(c.photoIds || []).length ? `<div class="thumbs">${c.photoIds.map(id => `<img src="/photos/${esc(id)}" alt="Evidence photo">`).join('')}</div>` : ''}</div></section>`;
   Object.assign(ACT, {
-    async printBT(b) { const c = byId('citations', b.dataset.id); b.disabled = true; try { await btWrite(citationZpl(c)); toast('Sent to printer'); } catch (e) { if (e.name !== 'NotFoundError') toast(e.message, true); bt.ch = null; } b.disabled = false; },
+    async printBT(b) { const c = byId('citations', b.dataset.id); b.disabled = true; try { await btWrite(citationZpl(c)); toast('Sent to printer'); } catch (e) { if (e.name !== 'NotFoundError' && e.name !== 'AbortError') toast(e.message, true); } b.disabled = false; },
+    printHelp() { window.printHelpDialog(); },
     printSys(b) { printHtml(byId('citations', b.dataset.id)); },
     doneCite() { UI.lastCite = null; UI.check = null; render(); },
   });
@@ -635,13 +743,21 @@
   window.hostedAudit = () => { const a = lazy('auditAll', '/api/admin/audit?limit=5000'); return Array.isArray(a) ? a : null; };
   /* The server’s change log for one ticket, shown on the ticket timeline. */
   window.ticketAudit = id => { const a = lazy('audit:' + id, '/api/admin/audit?coll=sessions&id=' + encodeURIComponent(id) + '&limit=200'); return Array.isArray(a) ? a : null; };
+  /* Overview revenue comes from the server's day totals, so it stays right however many payments a day there are. */
   window.hostedRevenue = function (days) {
     if (!can('payments') && !can('reports')) return null;
-    const l = window.hostedLedger(); if (!l) return null;
-    const out = days.map(d => Object.assign({}, d, { parking: 0, citations: 0, permits: 0 }));
-    const put = (t, k, a) => { const d = out.find(x => t >= x.s && t < x.e); if (d) d[k] += +a || 0; };
-    l.forEach(p => put(p.at, p.kind === 'monthly' ? 'permits' : p.kind === 'citation' ? 'citations' : 'parking', p.amount - (p.refunded || 0)));
-    return out;
+    const key = d => dayStr(d.s + 12 * 36e5), e = actGet(key(days[0]), key(days[days.length - 1]), '');
+    if (!e.data) return null;
+    const by = new Map(e.data.days.map(d => [d.date, d]));
+    return days.map(d => { const r = by.get(key(d)); return r ? Object.assign({}, d, { parking: r.parking, citations: r.notices, permits: r.monthly }) : d; });
+  };
+  /* Reports read what the screen holds (recent tickets and the latest payments); say so when the range reaches further back. */
+  window.hostedReportNote = function (rep, from) {
+    const parts = [], l = Array.isArray(UI.payList) ? UI.payList : null;
+    if (HX.screenSince && from < HX.screenSince) parts.push(`finished tickets from ${fmtFull(HX.screenSince, tzDefault()).replace(/,[^,]*$/, '')} on`);
+    if (l && l.length >= 5000 && from < l[l.length - 1].created_at) parts.push(`the latest ${l.length.toLocaleString()} payments (from ${fmtFull(l[l.length - 1].created_at, tzDefault()).replace(/,[^,]*$/, '')})`);
+    if (!parts.length) return '';
+    return `<div class="callout warn" style="margin:12px 16px 0"><b>This report is incomplete for the days you picked.</b> It reads ${parts.join(' and ')}. For any earlier day, use <b>By day</b> for totals, <b>History</b> for tickets, or <b>By day → Every payment (CSV)</b> for the full list of payments.</div>`;
   };
 
   /* ---------- exit desk: Square Terminal and card on file ---------- */
@@ -652,10 +768,11 @@
     const c = $('#termCancel', dlgForm); if (c) c.hidden = !state.cancel;
     const d = $('#termDone', dlgForm); if (d) d.hidden = !state.done;
   }
-  window.terminalCheckout = async function (id) {
-    const s = byId('sessions', id); if (!s) return;
-    const f = facById(s.facilityId), due = R.balanceOf(s); if (!(due > 0)) { toast('Nothing is owed on this ticket.'); return; }
-    const closeAfter = !s.endAt;
+  window.terminalCheckout = async function (id, opts) {
+    const s = byId('sessions', id); if (!s) return; opts = opts || {};
+    // opts.entry: event night, the flat event rate is charged at the entrance and the ticket stays open.
+    const f = facById(s.facilityId), due = opts.entry ? R.entryDue(s) : R.balanceOf(s); if (!(due > 0)) { toast('Nothing is owed on this ticket.'); return; }
+    const closeAfter = !s.endAt && !opts.entry;
     dlgCfg = null; clearTimeout(termTimer);
     dlgForm.innerHTML = `<div class="dlg-h"><h2>Square Terminal · ${esc(s.plate)}</h2><button type="button" class="btn sm" data-dlg="close">Close</button></div>
       <div class="dlg-b"><div id="termBox"></div><p class="note" style="margin:0">The amount is sent to the Terminal at ${esc(f ? f.name : 'the booth')}${HX.terminal && HX.terminal.simulated ? ' (simulated until Square is connected)' : ''}. The driver taps or inserts their card on the device. ${closeAfter ? 'The ticket closes when the payment goes through.' : ''}</p></div>
@@ -663,7 +780,7 @@
     dlg.showModal();
     terminalBox({ amount: R.taxOf(due).total, text: 'Sending to the Terminal…', busy: true });
     let ck;
-    try { ck = await api('POST', '/api/tickets/' + encodeURIComponent(id) + '/terminal', { close: closeAfter }); }
+    try { ck = await api('POST', '/api/tickets/' + encodeURIComponent(id) + '/terminal', { close: closeAfter, amount: opts.entry ? due : undefined }); }
     catch (e) { terminalBox({ amount: R.taxOf(due).total, text: 'Couldn’t start the Terminal payment', sub: e.message, done: true }); return; }
     const amount = ck.amount;
     $('#termCancel', dlgForm).onclick = async () => { try { await api('POST', '/api/terminal/' + encodeURIComponent(ck.checkoutId) + '/cancel', {}); } catch (e) { toast(e.message, true); } };
@@ -672,7 +789,7 @@
       let r; try { r = await api('GET', '/api/terminal/' + encodeURIComponent(ck.checkoutId)); } catch (e) { terminalBox({ amount, text: 'Waiting for Square…', sub: e.message, busy: true, cancel: true }); termTimer = setTimeout(poll, 3000); return; }
       if (r.status === 'COMPLETED') {
         terminalBox({ amount, text: 'Paid on the Terminal', sub: (r.closed ? 'Ticket closed. ' : '') + (r.overpaid ? `The card was charged ${money(r.overpaid)} more than is owed now; refund it from the ticket. ` : '') + (r.receiptUrl ? 'Square emailed or printed the receipt.' : ''), done: true });
-        UI.deskDone = { id, change: null, amount }; UI['audit:' + id] = undefined; UI.payList = undefined; render(); return;
+        UI.deskDone = { id, change: null, amount }; UI['audit:' + id] = undefined; UI.payList = undefined; actReset(); render(); return;
       }
       if (r.status === 'CANCELED' || r.status === 'CANCEL_REQUESTED') { terminalBox({ amount, text: r.status === 'CANCELED' ? 'Cancelled' : 'Cancelling…', sub: r.cancelReason ? String(r.cancelReason).replace(/_/g, ' ').toLowerCase() : 'No payment was taken.', done: r.status === 'CANCELED', busy: r.status !== 'CANCELED' }); if (r.status !== 'CANCELED') termTimer = setTimeout(poll, 2000); return; }
       terminalBox({ amount, text: r.status === 'IN_PROGRESS' ? 'Driver is paying on the device…' : 'Waiting for the driver to tap…', busy: true, cancel: true });
@@ -685,7 +802,7 @@
     const s = byId('sessions', id); if (!s) return;
     const due = R.balanceOf(s), member = s.memberId ? byId('members', s.memberId) : R.memberForPlate(normPlate(s.plate));
     confirmBox('Charge the card on file', `Charge ${money(R.taxOf(due).total)} to ${esc(member ? member.name : 'the driver')}’s card on file${member && member.card ? ' ending ' + esc(member.card) : ''} for ticket ${esc(R.ticketOf(s))}?${!s.endAt ? ' The ticket closes when the charge goes through.' : ''}`, 'Charge card', async () => {
-      try { const r = await api('POST', '/api/tickets/' + encodeURIComponent(id) + '/chargeCard', { close: !s.endAt }); UI.deskDone = { id, change: null, amount: r.amount }; UI.payList = undefined; toast(r.repeat ? 'That charge already went through.' : `Charged ${money(r.total)}${r.closed ? ' · ticket closed' : ''}`); render(); return true; }
+      try { const r = await api('POST', '/api/tickets/' + encodeURIComponent(id) + '/chargeCard', { close: !s.endAt }); UI.deskDone = { id, change: null, amount: r.amount }; UI.payList = undefined; actReset(); toast(r.repeat ? 'That charge already went through.' : `Charged ${money(r.total)}${r.closed ? ' · ticket closed' : ''}`); render(); return true; }
       catch (e) { return e.message; }
     });
   };
@@ -693,29 +810,28 @@
   window.refundByPid = true;
   ACT.refundPid = b => {
     openForm({ title: 'Refund card payment', submit: 'Refund', danger: true, fields: [{ id: 'amount', label: 'Amount ($)', type: 'number', step: '0.01', value: (+b.dataset.max).toFixed(2), required: true }, { id: 'reason', label: 'Reason', required: true }],
-      onSubmit: async v => { if (!(+v.amount > 0 && +v.amount <= +b.dataset.max + 0.005)) return `Enter up to ${money(b.dataset.max)}.`; try { await api('POST', '/api/admin/refund', { sqId: b.dataset.pid, amount: +v.amount, reason: v.reason }); toast('Refunded ' + money(v.amount)); UI.payList = undefined; return true; } catch (e) { return e.message; } } });
+      onSubmit: async v => { if (!(+v.amount > 0 && +v.amount <= +b.dataset.max + 0.005)) return `Enter up to ${money(b.dataset.max)}.`; try { await api('POST', '/api/admin/refund', { sqId: b.dataset.pid, amount: +v.amount, reason: v.reason }); toast('Refunded ' + money(v.amount)); UI.payList = undefined; actReset(); return true; } catch (e) { return e.message; } } });
   };
 
   /* ---------- staff: payments tab (ledger, tax, hot list) ---------- */
-  function taxByMonth(l) {
-    const m = new Map(), tz = tzDefault();
-    l.forEach(p => {
-      const k = new Date(p.at).toLocaleDateString('en-CA', { timeZone: tz }).slice(0, 7), r = m.get(k) || { month: k, gross: 0, refunds: 0, tax: 0, count: 0 };
-      const keep = p.amount ? (p.amount - (p.refunded || 0)) / p.amount : 1;
-      r.gross += p.amount; r.refunds += p.refunded || 0; r.tax += (p.tax || 0) * keep; r.count++; m.set(k, r);
-    });
-    return [...m.values()].sort((a, b) => b.month.localeCompare(a.month));
+  /* Sales tax by month: added up on the server from every payment, so it is complete however busy the year was. */
+  function taxRange() { const t = dayStr(Date.now()), [y, m] = t.split('-').map(Number), d = new Date(Date.UTC(y, m - 1 - 11, 1)); return [d.toISOString().slice(0, 10), t]; }
+  function taxMonths() {
+    const [f, t] = taxRange(), e = actGet(f, t, ''); if (!e.data) return e.err ? { error: e.err } : null;
+    const m = new Map();
+    e.data.days.forEach(d => { const k = d.date.slice(0, 7), r = m.get(k) || { month: k, gross: 0, refunds: 0, tax: 0, count: 0 }; r.gross += d.net + d.refunds; r.refunds += d.refunds; r.tax += d.tax; r.count += d.payments; m.set(k, r); });
+    return [...m.values()].filter(r => r.count).sort((a, b) => b.month.localeCompare(a.month));
   }
   window.vPayments = function () {
     const pays = ledgerRows(), l = window.hostedLedger() || [];
     const hot = R.hotList();
     const cfg = HX.payments || {};
-    const tm = l.length ? taxByMonth(l) : [];
+    const tmr = taxMonths(), tm = Array.isArray(tmr) ? tmr : [];
     const methodName = p => ParkRules.METHODS[p.method] || p.method || '';
     return `<div class="pagehead"><div><h1>Payments</h1><p>${cfg.enabled ? `Square ${esc(cfg.env)} is connected.` : 'Test mode: Square isn’t connected, so card payments are simulated.'} Refunds go back to the original card. Card disputes are handled in your Square Dashboard. Cash, checks and Terminal payments taken at the exit desk are here too.</p></div>
       <button class="btn" data-act="reloadPays">Refresh</button><a class="btn" href="/api/admin/collections.csv" data-perm="export">Export for collections</a><button class="btn" data-act="goTab" data-tab="reports" data-perm="reports">Reports</button></div>
     ${tm.length ? `<section class="panel"><div class="panel-h"><h2>Sales tax by month</h2><button class="btn sm" data-act="exportTax" data-perm="export">Export CSV</button></div><div class="tbl-wrap"><table><thead><tr><th>Month</th><th class="r">Payments</th><th class="r">Collected</th><th class="r">Refunded</th><th class="r">Net</th><th class="r">Sales tax (${esc(String((S.config || {}).taxRate || 0))}%)</th></tr></thead><tbody>${tm.slice(0, 12).map(r => `<tr><td class="num">${esc(r.month)}</td><td class="r num">${r.count}</td><td class="r num">${money(r.gross)}</td><td class="r num">${money(r.refunds)}</td><td class="r num">${money(r.gross - r.refunds)}</td><td class="r num"><b>${money(r.tax)}</b></td></tr>`).join('')}</tbody></table></div>
-      <div class="panel-b note" style="padding-top:8px">Every payment recorded in the system (last 5,000). Check your filing figures with your accountant.</div></section>` : ''}
+      <div class="panel-b note" style="padding-top:8px">Added up from every payment the system has recorded, last 12 months. Check your filing figures with your accountant.</div></section>` : ''}
     <section class="panel"><div class="panel-h"><h2>Hot list</h2><span class="muted" style="font-size:.84rem">Plates that owe ${money((S.config || {}).hotListAmount || 100)} or more, or have ${(S.config || {}).hotListCount || 3}+ open notices. Staff get an alert when one enters.</span></div>
       ${hot.length ? `<div class="tbl-wrap"><table><thead><tr><th>Plate</th><th class="r">Owed</th><th class="r">Unpaid exits</th><th class="r">Open notices</th></tr></thead><tbody>${hot.map(h => `<tr><td>${plateChip(h.plate)}</td><td class="r num"><b>${money(h.debt.total)}</b></td><td class="r num">${h.debt.owed.length}</td><td class="r num">${h.debt.cits.length}</td></tr>`).join('')}</tbody></table></div>` : '<div class="empty">No plates on the hot list.</div>'}</section>
     <section class="panel"><div class="panel-h"><h2>Recent payments</h2></div>
@@ -723,12 +839,224 @@
         <td><div class="acts">${p.pid && p.amount > p.refunded ? `<button class="btn sm" data-act="refund" data-id="${esc(p.id)}" data-max="${esc(p.amount - p.refunded)}" data-perm="refunds">Refund</button>` : ''}</div></td></tr>`).join('')}</tbody></table></div>` : '<div class="empty">No payments yet.</div>'}</section>`;
   };
   Object.assign(ACT, {
-    reloadPays() { UI.payList = undefined; render(); },
-    exportTax() { const tm = taxByMonth(window.hostedLedger() || []); saveFile('sales-tax-by-month.csv', csv([['Month', 'Payments', 'Collected', 'Refunded', 'Net', 'Sales tax'], ...tm.map(r => [r.month, r.count, r.gross.toFixed(2), r.refunds.toFixed(2), (r.gross - r.refunds).toFixed(2), r.tax.toFixed(2)])])); },
+    reloadPays() { UI.payList = undefined; actReset(); render(); },
+    exportTax() { const tm = taxMonths(); if (!Array.isArray(tm)) { toast('Still adding it up. Try again in a moment.', true); return; } saveFile('sales-tax-by-month.csv', csv([['Month', 'Payments', 'Collected', 'Refunded', 'Net', 'Sales tax'], ...tm.map(r => [r.month, r.count, r.gross.toFixed(2), r.refunds.toFixed(2), (r.gross - r.refunds).toFixed(2), r.tax.toFixed(2)])])); },
     refund(b) {
       openForm({ title: 'Refund payment', submit: 'Refund', fields: [{ id: 'amount', label: 'Amount ($)', type: 'number', step: '0.01', value: (+b.dataset.max).toFixed(2), required: true }, { id: 'reason', label: 'Reason', value: '' }],
-        onSubmit: async v => { if (!(+v.amount > 0 && +v.amount <= +b.dataset.max + 0.005)) return `Enter up to ${money(b.dataset.max)}.`; try { await api('POST', '/api/admin/refund', { id: b.dataset.id, amount: +v.amount, reason: v.reason }); toast('Refunded ' + money(v.amount)); UI.payList = undefined; return true; } catch (e) { return e.message; } } });
+        onSubmit: async v => { if (!(+v.amount > 0 && +v.amount <= +b.dataset.max + 0.005)) return `Enter up to ${money(b.dataset.max)}.`; try { await api('POST', '/api/admin/refund', { id: b.dataset.id, amount: +v.amount, reason: v.reason }); toast('Refunded ' + money(v.amount)); UI.payList = undefined; actReset(); return true; } catch (e) { return e.message; } } });
     },
+  });
+
+  /* ---------- staff: ticket history ----------
+     Every ticket ever recorded is kept in the server's database. The other screens hold the last few months in memory;
+     this one searches the whole database, so a ticket from three years ago is as easy to find as one from today. */
+  const fmtFull = (t, tz) => t ? new Date(t).toLocaleString([], { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit', timeZone: tz }) : '—';
+  const fmtMins = m => m == null ? '—' : m < 60 ? m + ' min' : Math.floor(m / 60) + ' h' + (m % 60 ? ' ' + (m % 60) + ' min' : '');
+  const fmtBytes = n => !n ? '0 KB' : n >= 1e9 ? (n / 1e9).toFixed(1) + ' GB' : n >= 1e6 ? Math.round(n / 1e6) + ' MB' : Math.max(1, Math.round(n / 1e3)) + ' KB';
+  const HIST_PAGE = 50;
+  const histParams = () => { const p = new URLSearchParams(); if (UI.histQ) p.set('q', UI.histQ); if (UI.histFac) p.set('facility', UI.histFac); if (UI.histFrom) p.set('from', UI.histFrom); if (UI.histTo) p.set('to', UI.histTo); if (UI.histStatus) p.set('status', UI.histStatus); return p; };
+  function histLoad() {
+    const p = histParams(); p.set('limit', HIST_PAGE); p.set('offset', UI.histOff || 0);
+    const mine = UI.histSeq = (UI.histSeq || 0) + 1; UI.histBusy = true;
+    api('GET', '/api/admin/history?' + p).then(d => { if (mine === UI.histSeq) { UI.hist = d; UI.histBusy = false; render(); } }).catch(e => { if (mine === UI.histSeq) { UI.hist = { error: e.message }; UI.histBusy = false; render(); } });
+  }
+  const histPreset = () => { const f = UI.histFrom || '', t = UI.histTo || ''; if (!f && !t) return 'all'; for (const [k] of PRESETS) { const d = presetDates(k); if (d && d[0] === f && d[1] === t) return k; } return 'custom'; };
+  function histPresetPicked(v) {
+    const set = (f, t) => { $('#hFrom').value = f; $('#hTo').value = t; };
+    if (v === 'all') set('', ''); else if (v !== 'custom') { const d = presetDates(v); set(d[0], d[1]); } else { const el = $('#hFrom'); if (el) el.focus(); return; }
+    FORMS.histSearch();
+  }
+  const histStatus = r => !r.endAt ? '<span class="pill info">On site</span>' : r.waived ? '<span class="pill">Waived</span>' : r.cited ? '<span class="pill">Cited</span>' : r.due > 0 ? '<span class="pill bad">Unpaid</span>' : '<span class="pill ok">Paid</span>';
+  window.vHistory = function () {
+    if (UI.hist === undefined) { UI.hist = null; histLoad(); }
+    const h = UI.hist, rows = (h && h.rows) || [], total = (h && h.total) || 0, off = UI.histOff || 0, facs = S.facilities;
+    const opt = (v, l, cur) => `<option value="${esc(v)}" ${String(v) === String(cur || '') ? 'selected' : ''}>${esc(l)}</option>`;
+    const filtered = !!(UI.histQ || UI.histFac || UI.histFrom || UI.histTo || UI.histStatus);
+    return `<div class="pagehead"><div><h1>Ticket history</h1><p>Every ticket ever recorded is kept on the server and can be found here, however old. The other screens show only the most recent months, to stay fast.</p></div>
+      <a class="btn" href="/api/admin/history.csv?${esc(histParams().toString())}" data-perm="export">Export ${filtered ? 'these results' : 'everything'} (CSV)</a></div>
+    <section class="panel"><form class="panel-b filters" data-form="histSearch" autocomplete="off">
+      <input id="hQ" type="search" placeholder="Plate or ticket number" value="${esc(UI.histQ || '')}" style="text-transform:uppercase">
+      <select id="hFac" style="flex:0 1 200px">${opt('', 'All locations', UI.histFac)}${facs.map(f => opt(f.id, f.name, UI.histFac)).join('')}</select>
+      <select id="hStatus" style="flex:0 1 150px">${opt('', 'Any status', UI.histStatus)}${opt('open', 'On site now', UI.histStatus)}${opt('closed', 'Left', UI.histStatus)}</select>
+      <select id="hPreset" style="flex:0 1 150px" aria-label="Dates">${opt('all', 'Any date', histPreset())}${PRESETS.map(([k, l]) => opt(k, l, histPreset())).join('')}</select>
+      <label class="field" style="flex:0 1 160px"><span class="help">From</span><input id="hFrom" type="date" value="${esc(UI.histFrom || '')}"></label>
+      <label class="field" style="flex:0 1 160px"><span class="help">To</span><input id="hTo" type="date" value="${esc(UI.histTo || '')}"></label>
+      <button class="btn pri">Search</button>${filtered ? '<button type="button" class="btn" data-act="histReset">Clear</button>' : ''}</form></section>
+    <section class="panel"><div class="panel-h"><h2>${UI.histBusy ? 'Searching…' : h && !h.error ? `${total.toLocaleString()} ticket${total === 1 ? '' : 's'}${filtered ? ' match' : ' saved'}` : 'Tickets'}</h2>
+      ${total > HIST_PAGE ? `<div class="row" style="align-items:center;gap:8px"><span class="muted" style="font-size:.84rem">${(off + 1).toLocaleString()}–${Math.min(total, off + HIST_PAGE).toLocaleString()}</span><button class="btn sm" data-act="histPage" data-v="-1" ${off <= 0 ? 'disabled' : ''}>‹ Newer</button><button class="btn sm" data-act="histPage" data-v="1" ${off + HIST_PAGE >= total ? 'disabled' : ''}>Older ›</button></div>` : ''}</div>
+      ${!h ? '<div class="empty">Loading…</div>' : h.error ? `<div class="empty">${esc(h.error)}</div>` : rows.length ? `<div class="tbl-wrap"><table><thead><tr><th>Ticket</th><th>Plate</th><th>Location</th><th>Arrived</th><th>Left</th><th class="r">Time</th><th class="r">Charged</th><th class="r">Balance</th><th>Status</th><th></th></tr></thead><tbody>${rows.map(r => { const tz = R.tzOf(facById(r.facilityId)); return `<tr><td class="mono">${esc(r.ticket)}</td><td>${plateChip(r.plate)}</td><td>${esc(r.facility)}</td><td class="num">${fmtFull(r.startAt, tz)}</td><td class="num">${fmtFull(r.endAt, tz)}</td><td class="r num">${fmtMins(r.minutes)}</td><td class="r num">${r.total == null ? '—' : money(r.total)}</td><td class="r num">${r.due > 0 ? `<b>${money(r.due)}</b>` : '—'}</td><td>${histStatus(r)}</td><td><div class="acts"><button class="btn sm" data-act="histOpen" data-id="${esc(r.id)}">Open</button></div></td></tr>`; }).join('')}</tbody></table></div>` : `<div class="empty">${filtered ? 'No tickets match. Try fewer filters, or part of the plate.' : 'No tickets recorded yet.'}</div>`}</section>`;
+  };
+  FORMS.histSearch = () => {
+    const v = id => ($('#' + id) || {}).value || '';
+    UI.histQ = v('hQ').trim(); UI.histFac = v('hFac'); UI.histStatus = v('hStatus'); UI.histFrom = v('hFrom'); UI.histTo = v('hTo'); UI.histOff = 0;
+    if (UI.histFrom && UI.histTo && UI.histFrom > UI.histTo) { toast('The “from” date is after the “to” date.', true); return; }
+    histLoad(); render();
+  };
+  /* A ticket from before the screens’ memory window opens here as a read-only record; recent ones open on the normal ticket page. */
+  async function histDetail(id) {
+    dlgCfg = null;
+    dlgForm.innerHTML = `<div class="dlg-h"><h2>Ticket</h2><button type="button" class="btn sm" data-dlg="close">Close</button></div><div class="dlg-b"><div class="empty">Loading…</div></div>`;
+    dlg.showModal();
+    let d; try { d = await api('GET', '/api/admin/history/' + encodeURIComponent(id)); } catch (e) { dlgForm.querySelector('.dlg-b').innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
+    const r = d.row, tz = R.tzOf(facById(r.facilityId)), b = d.bill || {};
+    const fact = (k, v) => `<div><small class="muted">${k}</small><div>${v}</div></div>`;
+    dlgForm.innerHTML = `<div class="dlg-h"><h2>Ticket ${esc(r.ticket)} · ${esc(r.plate)}</h2><button type="button" class="btn sm" data-dlg="close">Close</button></div>
+      <div class="dlg-b" style="display:grid;gap:14px">
+        <div style="display:grid;gap:10px;grid-template-columns:repeat(auto-fit,minmax(150px,1fr))">${fact('Location', esc(r.facility || '—'))}${fact('Arrived', fmtFull(r.startAt, tz))}${fact('Left', r.endAt ? fmtFull(r.endAt, tz) : 'Still on site')}${fact('Time parked', fmtMins(r.minutes))}${fact('Charged', r.total == null ? '—' : money(r.total))}${fact('Paid', money(r.paid || 0))}${fact('Balance', r.due > 0 ? `<b>${money(r.due)}</b>` : '—')}${fact('Status', histStatus(r))}${r.validation ? fact('Validation', esc(r.validation)) : ''}${d.plateOriginal ? fact('Plate as first read', esc(d.plateOriginal)) : ''}${d.valet ? fact('Valet', `Key ${esc(d.valet.tag || '—')} · ${esc(d.valet.space || '')}`) : ''}</div>
+        ${d.notes ? `<div class="note">${esc(d.notes)}</div>` : ''}
+        ${d.photos && (d.photos.entry || d.photos.exit) ? `<div class="row">${d.photos.entry ? `<a class="btn sm" href="/photos/${esc(d.photos.entry)}" target="_blank" rel="noopener">Entry photo</a>` : ''}${d.photos.exit ? `<a class="btn sm" href="/photos/${esc(d.photos.exit)}" target="_blank" rel="noopener">Exit photo</a>` : ''}<span class="note">Photos are removed after a set number of days unless a notice was issued (Settings shows how many).</span></div>` : ''}
+        <div><b>Payments</b>${d.payments.length ? `<div class="tbl-wrap"><table><thead><tr><th>When</th><th>How</th><th class="r">Amount</th><th>Taken by</th></tr></thead><tbody>${d.payments.map(x => `<tr><td class="num">${fmtFull(x.at, tz)}</td><td>${esc(ParkRules.METHODS[x.method] || x.method)}${x.simulated ? '<span class="sub">Simulated</span>' : ''}</td><td class="r num">${money(x.amount)}${x.refunded ? `<span class="sub">${money(x.refunded)} refunded</span>` : ''}</td><td>${esc(x.by)}</td></tr>`).join('')}</tbody></table></div>` : '<div class="note">No payments recorded.</div>'}</div>
+        <div><b>What happened</b>${d.history.length ? `<div class="list">${d.history.map(x => `<div class="li"><div class="grow"><b>${esc(String(x.action || '').replace(/_/g, ' '))}</b>${x.by ? `<span class="muted"> · ${esc(x.by)}</span>` : ''}${x.detail ? `<div class="muted" style="font-size:.84rem">${esc(x.detail)}</div>` : ''}</div><span class="muted num">${fmtFull(x.at, tz)}</span></div>`).join('')}</div>` : '<div class="note">No changes recorded.</div>'}</div>
+      </div>
+      <div class="dlg-f"><button type="button" class="btn" data-dlg="close">Close</button></div>`;
+  }
+  Object.assign(ACT, {
+    histPage(b) { UI.histOff = Math.max(0, (UI.histOff || 0) + HIST_PAGE * (+b.dataset.v)); histLoad(); render(); window.scrollTo(0, 0); },
+    histReset() { Object.assign(UI, { histQ: '', histFac: '', histFrom: '', histTo: '', histStatus: '', histOff: 0 }); histLoad(); render(); },
+    histOpen(b) { if (byId('sessions', b.dataset.id)) return ACT.openTicket(b); histDetail(b.dataset.id); },
+  });
+
+  /* ---------- staff: activity by day ----------
+     Pick any day, or a run of days, and see what happened: cars in and out, when they arrived, what was collected, who left
+     without paying. The numbers come from the server's database, so it reaches back as far as your records go. */
+  const PRESETS = [['today', 'Today'], ['yesterday', 'Yesterday'], ['week', 'Last 7 days'], ['month', 'Last 30 days'], ['lastmonth', 'Last month'], ['mtd', 'This month'], ['year', 'This year'], ['custom', 'Pick dates']];
+  const dayStr = t => new Date(t).toLocaleDateString('en-CA', { timeZone: tzDefault() });
+  const addDay = (s, n) => new Date(Date.parse(s + 'T00:00:00Z') + n * 864e5).toISOString().slice(0, 10);
+  function presetDates(p) {
+    const t = dayStr(Date.now());
+    if (p === 'today') return [t, t];
+    if (p === 'yesterday') { const y = addDay(t, -1); return [y, y]; }
+    if (p === 'week') return [addDay(t, -6), t];
+    if (p === 'month') return [addDay(t, -29), t];
+    if (p === 'mtd') return [t.slice(0, 8) + '01', t];
+    if (p === 'lastmonth') { const last = addDay(t.slice(0, 8) + '01', -1); return [last.slice(0, 8) + '01', last]; }
+    if (p === 'year') return [t.slice(0, 5) + '01-01', t];
+    return null;
+  }
+  const dayLabel = (str, withYear) => new Date(str + 'T12:00:00Z').toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric', year: withYear ? 'numeric' : undefined, timeZone: 'UTC' });
+  const shortDay = str => new Date(str + 'T12:00:00Z').toLocaleDateString([], { month: 'numeric', day: 'numeric', timeZone: 'UTC' });
+
+  /* One request per (range, location); a range that includes today is asked again every couple of minutes. */
+  const actMap = new Map();
+  function actReset() { actMap.clear(); }
+  window.actReset = actReset;
+  function actGet(from, to, fac) {
+    const key = [from, to, fac || '', to >= dayStr(Date.now()) ? Math.floor(Date.now() / 12e4) : ''].join('|');
+    let e = actMap.get(key);
+    if (!e) {
+      e = { data: null, err: '' }; actMap.set(key, e); if (actMap.size > 30) actMap.delete(actMap.keys().next().value);
+      api('GET', '/api/admin/activity?from=' + from + '&to=' + to + (fac ? '&facility=' + encodeURIComponent(fac) : '')).then(d => { e.data = d; schedule(); }).catch(err => { e.err = err.message || 'Couldn’t load'; schedule(); });
+    }
+    return e;
+  }
+
+  /* A bar chart in plain HTML: hairline grid, bars no thicker than 24px with a rounded top, labels in text colours, hover for the number. */
+  function niceTop(v, ticks) { if (!(v > 0)) return ticks; const raw = v / ticks, e = Math.pow(10, Math.floor(Math.log10(raw))), f = raw / e, n = f <= 1 ? 1 : f <= 2 ? 2 : f <= 2.5 ? 2.5 : f <= 5 ? 5 : 10; return n * e * ticks; }
+  function barChart(items, o) {
+    o = o || {}; const max = Math.max(0, ...items.map(i => i.v)), ticks = 4, top = o.int && max <= 4 ? Math.max(1, Math.ceil(max)) : niceTop(max, ticks), tn = o.int && max <= 4 ? top : ticks, fmt = o.fmt || (x => x.toLocaleString());
+    const step = Math.max(1, Math.ceil(items.length / (o.labels || 8))), ys = Array.from({ length: tn + 1 }, (_, i) => top * i / tn);
+    return `<div class="ch" role="img" aria-label="${esc(o.aria || 'Chart')}">
+      <div class="ch-y">${ys.map(y => `<span style="bottom:${y / top * 100}%">${esc(fmt(y))}</span>`).join('')}</div>
+      <div class="ch-plot">${ys.slice(1).map(y => `<div class="gl" style="bottom:${y / top * 100}%"></div>`).join('')}<div class="ch-bars">${items.map(i => `<div class="ch-col" data-tip="${esc(i.tip)}"><i style="height:${i.v / top * 100}%${i.v > 0 ? ';min-height:2px' : ''}"></i></div>`).join('')}</div></div>
+      <div class="ch-x">${items.map((i, k) => `<span>${k % step === 0 ? esc(i.label) : ''}</span>`).join('')}</div></div>`;
+  }
+  (function () {
+    const tip = document.createElement('div'); tip.id = 'chTip'; tip.hidden = true; document.body.appendChild(tip);
+    const place = e => { const w = tip.offsetWidth, h = tip.offsetHeight; tip.style.left = Math.max(8, Math.min(innerWidth - w - 8, e.clientX + 12)) + 'px'; tip.style.top = (e.clientY - h - 12 < 4 ? e.clientY + 18 : e.clientY - h - 12) + 'px'; };
+    document.addEventListener('mouseover', e => { const c = e.target.closest && e.target.closest('[data-tip]'); if (!c) { tip.hidden = true; return; } tip.textContent = c.dataset.tip; tip.hidden = false; place(e); });
+    document.addEventListener('mousemove', e => { if (!tip.hidden) place(e); });
+    document.addEventListener('scroll', () => { tip.hidden = true; }, true);
+  })();
+  const weekStart = str => { const d = new Date(str + 'T12:00:00Z'), k = (d.getUTCDay() + 6) % 7; return addDay(str, -k); };
+  /* Past about four months the daily bars get too thin to read, so they become weekly bars. */
+  function bucketed(days) {
+    if (days.length <= 120) return days.map(d => Object.assign({}, d, { label: shortDay(d.date), name: dayLabel(d.date, true) }));
+    const m = new Map();
+    days.forEach(d => { const k = weekStart(d.date), b = m.get(k) || { date: k, arrivals: 0, departures: 0, net: 0, parking: 0, monthly: 0, notices: 0, refunds: 0, tax: 0, leftUnpaid: 0, days: 0 }; ['arrivals', 'departures', 'net', 'parking', 'monthly', 'notices', 'refunds', 'tax', 'leftUnpaid'].forEach(f => { b[f] += d[f]; }); b.days++; m.set(k, b); });
+    return [...m.values()].map(b => Object.assign(b, { label: shortDay(b.date), name: 'Week of ' + dayLabel(b.date, true) }));
+  }
+  const money0 = n => '$' + Math.round(n).toLocaleString();
+  const moneyK = n => n >= 1e6 ? '$' + +(n / 1e6).toFixed(1) + 'M' : n >= 1e4 ? '$' + Math.round(n / 1e3) + 'k' : money0(n);
+  const stay = m => m == null ? '—' : m < 60 ? m + 'm' : Math.floor(m / 60) + 'h' + (m % 60 ? ' ' + (m % 60) + 'm' : '');
+  const fmtHour = h => (h % 12 || 12) + (h < 12 ? 'a' : 'p');
+  const fmtHourLong = h => (h % 12 || 12) + ':00 ' + (h < 12 ? 'am' : 'pm');
+  function dailyRange() {
+    let [from, to] = presetDates(UI.dyPreset || 'week') || [UI.dyFrom, UI.dyTo];
+    if (!from || !to) { [from, to] = presetDates('week'); }
+    if (from > to) [from, to] = [to, from];
+    return [from, to];
+  }
+  window.vDaily = function () {
+    if (!UI.dyPreset) UI.dyPreset = 'week';
+    const [from, to] = dailyRange(), fac = UI.dyFac || '', e = actGet(from, to, fac);
+    if (e.data) UI.dyLast = e.data;
+    const rep = e.data || UI.dyLast, loading = !e.data && !e.err, stale = loading && rep, single = from === to;
+    const opt = (v, l, cur) => `<option value="${esc(v)}" ${String(v) === String(cur || '') ? 'selected' : ''}>${esc(l)}</option>`;
+    const thisYear = dayStr(Date.now()).slice(0, 4), multiYear = from.slice(0, 4) !== to.slice(0, 4) || from.slice(0, 4) !== thisYear;
+    const heading = single ? dayLabel(from, true) : dayLabel(from, multiYear) + ' – ' + dayLabel(to, multiYear);
+    const qs = `from=${from}&to=${to}${fac ? '&facility=' + encodeURIComponent(fac) : ''}`;
+    let body = '';
+    if (e.err && !rep) body = `<section class="panel"><div class="empty">${esc(e.err)}</div></section>`;
+    else if (!rep) body = '<section class="panel"><div class="empty">Loading…</div></section>';
+    else {
+      const T = rep.totals, days = rep.days, nonEmpty = days.some(d => d.arrivals || d.departures || d.payments);
+      const first = rep.firstTicketAt ? dayStr(rep.firstTicketAt) : '';
+      const kpi = (label, val, sub, alert) => `<div class="kpi ${alert ? 'alert' : ''}"><small>${label}</small><b>${val}</b><span>${sub || '&nbsp;'}</span></div>`;
+      const lead = Math.max(0, days.findIndex(d => d.arrivals || d.departures || d.payments)), live = days.slice(lead), bk = bucketed(live), weekly = live.length > 120;
+      const inTip = d => `${d.name}\n${d.arrivals.toLocaleString()} cars in · ${d.departures.toLocaleString()} out`;
+      const cashTip = d => `${d.name}\n${money(d.net)} collected${d.refunds ? '\n' + money(d.refunds) + ' refunded' : ''}\n${money(d.parking)} parking · ${money(d.monthly)} monthly · ${money(d.notices)} notices`;
+      const hoursChart = barChart(rep.hours.map((n, h) => ({ v: n, label: h % 3 === 0 ? fmtHour(h) : '', tip: `${fmtHourLong(h)}–${fmtHourLong((h + 1) % 24)}\n${n.toLocaleString()} car${n === 1 ? '' : 's'} arrived${single ? '' : ' (all days added up)'}` })), { int: true, labels: 24, aria: 'Cars arriving, by hour of the day' });
+      const methodName = m => ParkRules.METHODS[m] || m;
+      const rows = (UI.dyAll ? days.slice().reverse() : days.slice().reverse().slice(0, 62));
+      body = `<div class="kpis sm">
+        ${kpi('Cars in', T.arrivals.toLocaleString(), single ? '' : `${Math.round(T.arrivals / Math.max(1, live.length)).toLocaleString()} a day`)}
+        ${kpi('Cars out', T.departures.toLocaleString(), T.monthlyVisits ? `${T.monthlyVisits.toLocaleString()} were monthly parkers` : '')}
+        ${kpi('Collected', money0(T.net), `${money0(T.parking)} parking · ${money0(T.monthly)} monthly${T.notices ? ' · ' + money0(T.notices) + ' notices' : ''}`)}
+        ${kpi('Average stay', stay(T.avgMinutes), 'Cars that left in this period')}
+        ${kpi('Left without paying', T.leftUnpaid.toLocaleString(), T.leftUnpaid ? `${money0(T.leftUnpaidAmount)} not collected` : 'Nothing owed', T.leftUnpaid > 0)}
+        ${kpi('Sales tax included', money0(T.tax), T.refunds ? `After ${money0(T.refunds)} of refunds` : 'In what was collected')}</div>
+      ${nonEmpty ? '' : `<section class="panel"><div class="empty">Nothing was recorded ${single ? 'on this day' : 'in these days'}${first && from < first ? `. Your records begin ${dayLabel(first, true)}.` : '.'}</div></section>`}
+      ${nonEmpty ? `<div class="grid g2e">
+        <section class="panel"><div class="panel-h"><h2>${single ? 'Cars arriving, by hour' : 'Cars in' + (weekly ? ', by week' : ', by day')}</h2></div><div class="panel-b">${single ? hoursChart : barChart(bk.map(d => ({ v: d.arrivals, label: d.label, tip: inTip(d) })), { int: true, aria: 'Cars in by ' + (weekly ? 'week' : 'day') })}</div></section>
+        <section class="panel"><div class="panel-h"><h2>${single ? 'When they came' : 'Collected' + (weekly ? ', by week' : ', by day')}</h2></div><div class="panel-b">${single
+          ? `<div style="display:grid;gap:8px;font-size:.92rem"><div>Busiest hour: <b>${(() => { const mx = Math.max(...rep.hours); return mx ? fmtHourLong(rep.hours.indexOf(mx)) + ' (' + mx.toLocaleString() + ' cars)' : '—'; })()}</b></div><div>Collected: <b>${money(T.net)}</b> from ${T.payments.toLocaleString()} payment${T.payments === 1 ? '' : 's'}</div>${T.refunds ? `<div>Refunded: <b>${money(T.refunds)}</b></div>` : ''}</div>`
+          : barChart(bk.map(d => ({ v: Math.max(0, d.net), label: d.label, tip: cashTip(d) })), { fmt: moneyK, aria: 'Money collected by ' + (weekly ? 'week' : 'day') })}</div></section>
+        ${single ? '' : `<section class="panel"><div class="panel-h"><h2>When cars arrive</h2><span class="muted" style="font-size:.84rem">${live.length === 1 ? 'The one day' : 'All ' + live.length + ' days'} added up</span></div><div class="panel-b">${hoursChart}</div></section>`}
+        <section class="panel"><div class="panel-h"><h2>By location</h2></div><div class="tbl-wrap"><table><thead><tr><th>Location</th><th class="r">Cars in</th><th class="r">Cars out</th><th class="r">Collected</th></tr></thead><tbody>${rep.byFacility.filter(f => f.arrivals || f.departures || f.revenue).map(f => `<tr><td>${esc(f.name)}</td><td class="r num">${f.arrivals.toLocaleString()}</td><td class="r num">${f.departures.toLocaleString()}</td><td class="r num">${money(f.revenue)}</td></tr>`).join('') || '<tr><td colspan="4" class="muted">Nothing recorded.</td></tr>'}</tbody></table></div></section>
+        <section class="panel"><div class="panel-h"><h2>How people paid</h2></div><div class="tbl-wrap"><table><thead><tr><th>Method</th><th class="r">Payments</th><th class="r">Amount</th></tr></thead><tbody>${rep.byMethod.length ? rep.byMethod.map(m => `<tr><td>${esc(methodName(m.method))}</td><td class="r num">${m.count.toLocaleString()}</td><td class="r num">${money(m.amount)}</td></tr>`).join('') : '<tr><td colspan="3" class="muted">No payments.</td></tr>'}</tbody></table></div></section></div>` : ''}
+      ${nonEmpty && !single ? `<section class="panel"><div class="panel-h"><h2>Day by day</h2><span class="muted" style="font-size:.84rem">Click a day to see its tickets</span></div><div class="tbl-wrap"><table class="daytbl"><thead><tr><th>Day</th><th class="r">Cars in</th><th class="r">Cars out</th><th class="r">Average stay</th><th class="r">Left without paying</th><th class="r">Collected</th><th class="r">Refunded</th><th class="r">Sales tax</th></tr></thead><tbody>${rows.map(d => `<tr data-act="dayOpen" data-d="${d.date}"><td>${dayLabel(d.date, multiYear)}</td><td class="r num">${d.arrivals.toLocaleString()}</td><td class="r num">${d.departures.toLocaleString()}</td><td class="r num">${d.avgMinutes == null ? '—' : fmtMins(d.avgMinutes)}</td><td class="r num">${d.leftUnpaid ? `${d.leftUnpaid.toLocaleString()} · ${money(d.leftUnpaidAmount)}` : '—'}</td><td class="r num">${money(d.net)}</td><td class="r num">${d.refunds ? money(d.refunds) : '—'}</td><td class="r num">${money(d.tax)}</td></tr>`).join('')}</tbody><tfoot><tr><td><b>Total</b></td><td class="r num"><b>${T.arrivals.toLocaleString()}</b></td><td class="r num"><b>${T.departures.toLocaleString()}</b></td><td class="r num"><b>${T.avgMinutes == null ? '—' : fmtMins(T.avgMinutes)}</b></td><td class="r num"><b>${T.leftUnpaid.toLocaleString()}</b></td><td class="r num"><b>${money(T.net)}</b></td><td class="r num"><b>${money(T.refunds)}</b></td><td class="r num"><b>${money(T.tax)}</b></td></tr></tfoot></table></div>
+        ${days.length > rows.length ? `<div class="panel-b"><button class="btn sm" data-act="dayAll">Show all ${days.length} days</button></div>` : ''}</section>` : ''}
+      ${single && nonEmpty ? `<div class="row"><button class="btn pri" data-act="dayOpen" data-d="${from}">See this day’s tickets</button></div>` : ''}
+      <p class="skip-note">Days run midnight to midnight in ${esc(rep.timeZone)}. “Left without paying” counts cars that left owing money that was not paid, waived or sent as a notice. Collected is net of refunds.</p>`;
+    }
+    return `<div class="pagehead"><div><h1>Activity by day</h1><p>Pick any day, or a run of days, and see what happened. It reaches back as far as your records go.</p></div>
+      <div class="row"><a class="btn" href="/api/admin/activity.csv?${esc(qs)}" data-perm="export">Summary (CSV)</a><a class="btn" href="/api/admin/payments.csv?${esc(qs)}" data-perm="export">Every payment (CSV)</a></div></div>
+    <section class="panel"><div class="panel-b" style="display:grid;gap:12px">
+      <div class="presets" role="group" aria-label="Dates">${PRESETS.map(([k, l]) => `<button type="button" data-act="dyPreset" data-v="${k}" aria-pressed="${(UI.dyPreset || 'week') === k}">${l}</button>`).join('')}</div>
+      <div class="daybar">
+        ${UI.dyPreset === 'custom' ? `<label class="field" style="flex:0 1 160px"><span class="help">From</span><input id="dyFrom" type="date" value="${esc(from)}" max="${esc(dayStr(Date.now()))}" data-dyfield="1"></label><label class="field" style="flex:0 1 160px"><span class="help">To</span><input id="dyTo" type="date" value="${esc(to)}" max="${esc(dayStr(Date.now()))}" data-dyfield="1"></label>` : ''}
+        <button class="btn sm" data-act="dyStep" data-v="-1" aria-label="Earlier">‹ Earlier</button><button class="btn sm" data-act="dyStep" data-v="1" aria-label="Later" ${to >= dayStr(Date.now()) ? 'disabled' : ''}>Later ›</button>
+        <span class="range">${esc(heading)}</span>${loading ? '<span class="muted">Loading…</span>' : ''}
+        <span style="flex:1"></span>
+        <select id="dyFac" style="flex:0 1 220px" aria-label="Location">${opt('', 'All locations', fac)}${S.facilities.map(f => opt(f.id, f.name, fac)).join('')}</select>
+        <button class="btn sm" data-act="dyRefresh">Refresh</button></div></div></section>
+    <div class="${stale ? 'dim' : ''}" style="display:grid;gap:14px">${body}</div>`;
+  };
+  document.addEventListener('change', e => {
+    if (e.target.id === 'dyFac') { UI.dyFac = e.target.value; render(); }
+    else if (e.target.dataset && e.target.dataset.dyfield) { const f = ($('#dyFrom') || {}).value, t = ($('#dyTo') || {}).value; if (f && t) { UI.dyFrom = f; UI.dyTo = t; UI.dyAll = false; render(); } }
+    else if (e.target.id === 'hPreset') { histPresetPicked(e.target.value); }
+  });
+  Object.assign(ACT, {
+    dyPreset(b) { const k = b.dataset.v; if (k === 'custom') { const [f, t] = dailyRange(); UI.dyFrom = f; UI.dyTo = t; } UI.dyPreset = k; UI.dyAll = false; render(); },
+    dyStep(b) { /* move the whole window earlier or later by its own length */
+      const [f, t] = dailyRange(), n = Math.round((Date.parse(t + 'T00:00:00Z') - Date.parse(f + 'T00:00:00Z')) / 864e5) + 1, v = +b.dataset.v, today = dayStr(Date.now());
+      let nf = addDay(f, n * v), nt = addDay(t, n * v); if (nt > today) { nt = today; nf = addDay(nt, -(n - 1)); }
+      UI.dyFrom = nf; UI.dyTo = nt; UI.dyPreset = 'custom'; UI.dyAll = false; render();
+    },
+    dyRefresh() { actReset(); render(); },
+    dayAll() { UI.dyAll = true; render(); },
+    dayOpen(b) { Object.assign(UI, { histQ: '', histFac: UI.dyFac || '', histStatus: '', histFrom: b.dataset.d, histTo: b.dataset.d, histOff: 0 }); UI.hist = undefined; ACT.goTab({ dataset: { tab: 'history' } }); },
   });
 
   /* ---------- staff: people & access, system, activity log ---------- */
@@ -748,7 +1076,11 @@
       <div><b>Email:</b> ${out && out.configured ? 'Sending' : 'Not set up: messages are kept below instead of sent'}</div>
       <div><b>Text messages:</b> ${sm && sm.configured ? `Sending${HX.sms && HX.sms.number ? ' from ' + esc(HX.sms.number) : ''}` : 'Not set up: texts are kept below instead of sent'}</div>
       <div><b>Text-to-pay webhook:</b> <span class="mono">${esc(siteBase())}/sms/inbound</span></div>
-      <div><b>Backups:</b> automatic every day, last 14 kept on the server disk.</div>
+      <div><b>Backups:</b> automatic every day, the last 7 kept on the server disk. Download one now and then and keep it somewhere else too.</div>
+      ${(() => { const st = lazy('storage', '/api/admin/storage'); if (!st || st.error) return ''; const low = st.disk && (st.disk.free < Math.min(st.disk.total * 0.15, 2e9) || st.disk.free < 200e6);
+        return `<div><b>Saved forever:</b> ${st.tickets.toLocaleString()} ticket${st.tickets === 1 ? '' : 's'}${st.firstTicketAt ? ` since ${fmtFull(st.firstTicketAt, tzDefault()).replace(/,[^,]*$/, '')}` : ''}, plus every payment and change. Search them under History.</div>
+        <div><b>Storage:</b> ${fmtBytes(st.database)} records · ${fmtBytes(st.backups)} backups · ${fmtBytes(st.photos)} photos (${st.photoCount.toLocaleString()}, kept ${st.photoDays} days)${st.disk ? ` · ${fmtBytes(st.disk.free)} free of ${fmtBytes(st.disk.total)}` : ''}</div>
+        ${low ? '<div class="callout warn"><b>The disk is getting full.</b> Your records are safe, but make the disk bigger soon: in Render open the parkops service, choose Disks, and increase the size (it can grow, not shrink).</div>' : ''}`; })()}
       <div class="row"><button class="btn" data-act="backupNow">Download a backup now</button></div></div></section>` : ''}
     <section class="panel" ${can('settings') ? '' : 'style="grid-column:1/-1"'}><div class="panel-h"><h2>Activity log</h2><button class="btn sm" data-act="reloadAudit">Refresh</button></div>
       ${!audit ? '<div class="empty">Loading…</div>' : audit.error ? `<div class="empty">${esc(audit.error)}</div>` : `<div class="tbl-wrap" style="max-height:420px;overflow:auto"><table><thead><tr><th>When</th><th>Who</th><th>What</th><th>Record</th></tr></thead><tbody>${audit.map(a => `<tr><td class="num">${fmtTime(a.at)}</td><td>${esc(a.actor || '')}</td><td>${esc(a.action)}</td><td class="mono">${esc([a.coll, a.doc_id].filter(Boolean).join('/'))}</td></tr>`).join('')}</tbody></table></div>`}</section></div>

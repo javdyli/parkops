@@ -3,7 +3,7 @@
 window.PARKOPS_HOSTED = (function () {
   const COLLS = ['facilities', 'permitTypes', 'permits', 'sessions', 'citations', 'validations', 'members', 'tenants', 'cameras', 'reservations', 'companies', 'invoices', 'vips', 'ratings'];
   const data = {}; COLLS.forEach(c => { data[c] = new Map(); });
-  let config = null, feed = [], role = 'public', webhookBase = '', payments = null, account = null, user = null, sms = null, terminal = null, email = false;
+  let config = null, feed = [], role = 'public', webhookBase = '', payments = null, account = null, user = null, sms = null, terminal = null, email = false, screenSince = null, scan = null;
   const subs = {}; const docSubs = { 'settings/config': [], 'feeds/lpr': [] };
   const fire = c => (subs[c] || []).forEach(fn => fn());
   const fireDoc = k => (docSubs[k] || []).forEach(fn => fn());
@@ -59,12 +59,12 @@ window.PARKOPS_HOSTED = (function () {
     es.onopen = () => { const el = document.querySelector('#live'); if (el) { el.className = 'live on'; el.lastElementChild.textContent = 'Live'; } };
   }
   return {
-    get webhookBase() { return webhookBase; }, get terminal() { return terminal; }, get email() { return email; },
+    get webhookBase() { return webhookBase; }, get terminal() { return terminal; }, get email() { return email; }, get screenSince() { return screenSince; }, get scan() { return scan; },
     get payments() { return payments; }, get account() { return account; }, set account(a) { account = a; }, get user() { return user; }, get role() { return role; }, get sms() { return sms; },
     api,
     async init() {
       const st = await api('GET', '/api/state');
-      role = st.role; webhookBase = st.webhookBase; config = st.config; feed = st.feed || []; payments = st.payments; account = st.account; user = st.user; sms = st.sms || null; terminal = st.terminal || null; email = !!st.email;
+      role = st.role; webhookBase = st.webhookBase; config = st.config; feed = st.feed || []; payments = st.payments; account = st.account; user = st.user; sms = st.sms || null; terminal = st.terminal || null; email = !!st.email; screenSince = st.screenSince || null; scan = st.scan || null;
       COLLS.forEach(c => (st[c] || []).forEach(d => data[c].set(d.id, strip(d))));
       stream();
       /* Which console views a role gets: owners, managers and attendants work tickets and enforcement; accountants and

@@ -134,8 +134,14 @@ Twilio handles STOP, START and HELP automatically.
 - **Daily maximum and parking day:** either a day that resets at a set time (3 AM is common downtown) or a rolling 24 hours from arrival. Each day is capped at the maximum.
 - **Rate snapshot:** every ticket keeps a copy of the rates it started under. Changing rates only affects new arrivals; the ticket page says when a ticket is on older rates.
 - **Grace period, reserved section, valet fee, Square Terminal device, count adjustment.**
+- **Paying ahead online:** turn it off for a pay-on-exit garage. The garage leaves the driver page's "Pay to park" list and the server refuses prepay there; drivers are charged for the whole visit when they leave.
+- **Pay buttons on the driver page:** *Hours, then All day* (default); *Hours until the daily max, then one "N+ hrs" button* that pays for the rest of the parking day (for example $10/hour with a $40 cap shows 1, 2, 3 hours, then "4+ hrs" good until the reset); or *One "All day" price* for flat-rate lots (a rate table of `1440=10` with a $10 daily max reads "$10.00 all day").
+- **Status:** a location set to *Closed (hidden from drivers)* still holds monthly plans (for example a monthly-only lot) but never appears in the driver's location list.
+- **Spaces available** (Overview, Occupancy) = total spaces − visitors parked − the location's active monthly parkers − count adjustment. Every active monthly parker holds a space at their plan's location (the first one when a plan covers several), parked or not; a monthly car the cameras see inside its own location is part of that hold, so it isn't counted twice. The "almost full" alert uses the same number.
 
-**Rates & specials** adds flat-rate specials (early bird, evening, weekend, event dates). A driver always pays the lower of the special and the regular rate. Holidays turn off specials, except event specials.
+**Rates & specials** adds flat-rate specials (early bird, evening, weekend, event dates). A driver pays the lower of the special and the regular rate, unless the special is set to **charge exactly this price** (the *Event* preset does this). Holidays turn off specials, except event specials.
+
+**Event nights:** add an *Event* special per event night with its date, the time event pricing starts and the price ($25 flat, leave by the 3 AM reset the next day). A car that enters inside that window pays the flat price however short its stay; one still inside after the reset pays the regular rate for the new day on exit. At the exit desk an event-night ticket shows **Collect $25 event rate** (cash, card or Square Terminal) so attendants collect at the entrance; the ticket stays open and the exit is already paid. Validation codes are refused on event nights unless the code is marked **Works on event nights**; those stays get the code's free time, then regular rates on exit.
 
 **Pay sign** (QR lots) prints a sign with the QR code, the lot number, the web address, the text-to-pay line and your rates, plus a warning about fake QR stickers and an optional tow-notice block. Print on letter paper or save as a PDF for a sign shop; download the QR as SVG.
 
@@ -162,6 +168,8 @@ Twilio handles STOP, START and HELP automatically.
 - One code per visit. Staff can **replace** a code with a reason (manager role); replacements and removals are kept in the ticket history and the Waived & adjusted report.
 - **Validation-code occupancy** (Validations tab, and Reports) shows how many cars with a code were parked at the same time, per day, with the tickets behind the number. A car counts from its arrival even if the code was applied later; cars still parked count until now; visits open longer than the flag hours (Settings, default 24) are highlighted as possible missed exits.
 - **Tenants** with an allotment (for example a restaurant's valet company with 30 spaces) get a daily peak, overage count and overage charge, exportable for their bill.
+- **Event nights:** each code has *Works on event nights* (default no). See section 4.
+- **Repeat use:** a car that uses the same code again and again (default 3 or more times in 7 days; Settings) is listed under **Repeat use to review** on the Validations tab and in Needs attention. It is a flag for review, never a refusal.
 
 ## 7. Monthly parking
 
@@ -180,6 +188,8 @@ Twilio handles STOP, START and HELP automatically.
 **Hikvision ANPR:** *Configuration → Network → Advanced → HTTP Listening* (or *Alarm Server*): Host = your domain, URL = `/lpr/<lane token>`, port 443, HTTPS; turn on **Notify Surveillance Center / Upload to Center** in the ANPR event. ParkOps reads `<licensePlate>` and `<confidenceLevel>` and saves the plate picture.
 
 **Axis License Plate Verifier:** *Settings → Integration → Push events*: HTTP POST, JSON, URL `https://your-domain/lpr/<token>`; turn on image sending for photos. Only `carState: new` is counted.
+
+**Importing a camera export** (Cameras → Import reads): drag a CSV anywhere on the Cameras page, for example an Axis License Plate Verifier export. ParkOps guesses the plate, camera and date/time columns (a separate time column works too; Axis's `20261005 140322` timestamps are understood) and shows a preview where you fix any guess and match each camera name in the file to a lane. Nothing is saved until **Import**. Reads go in oldest first, 500 at a time, so entries and exits pair into visits that occupancy, unpaid-exit tracking and enforcement see. Times without a time zone are read as the computer's local time. Reads more than 2 hours old build visits but don't charge saved cards or send hot-list alerts.
 
 **Anything else:** `https://your-domain/lpr/<token>?plate=ABC1234`. Test with `curl`, or simulate traffic with `BASE=https://your-domain ENTRY=<token> EXIT=<token> npm run simulate -- 20`.
 

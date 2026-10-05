@@ -165,9 +165,19 @@
       if (sp.exitAfter) { const e = hm(sp.exitAfter); if (end < zoned(p.year, p.month, p.day, Math.floor(e / 60), e % 60, tz)) return false; }
       return true;
     }
-    function bestSpecial(f, start, end) {
-      const list = ((f && f.rates && f.rates.specials) || []).filter(sp => specialQualifies(sp, f, start, end));
-      return list.sort((a, b) => a.price - b.price)[0] || null;
+    /* Event nights are specials with event dates. A flat special ("charge exactly this price") wins even when the
+       regular rate would be lower: that is how a $25 event rate is collected at the entrance. A stay belongs to an
+       event night when the car entered inside the event's window, however long it then stays. A validated stay is
+       priced without event specials: the code's free time comes off, then the regular rates apply. */
+    const isEvent = sp => !!(sp && Array.isArray(sp.dates) && sp.dates.length);
+    function eventAt(f, start) {
+      if (!start) return null;
+      return ((f && f.rates && f.rates.specials) || []).find(sp => sp.active !== false && isEvent(sp) && specialQualifies(Object.assign({}, sp, { exitBy: null, exitAfter: null, minStayMin: 0 }), f, start, start + M)) || null;
+    }
+    function bestSpecial(f, start, end, skipEvents) {
+      const list = ((f && f.rates && f.rates.specials) || []).filter(sp => !(skipEvents && isEvent(sp)) && specialQualifies(sp, f, start, end));
+      const flat = list.filter(sp => sp.flat).sort((a, b) => a.price - b.price)[0];
+      return flat || list.sort((a, b) => a.price - b.price)[0] || null;
     }
     /* Price of a stay with the full breakdown: parking days, special applied, validation effect.
        Validation types: hours (free time from the original arrival), percent, dollar (amount off), fixed (pay at
@@ -183,8 +193,8 @@
       const days = [];
       const std = standard(f, eff, end, days, start);
       let amount = std, rule = 'standard';
-      const sp = bestSpecial(f, start, end);
-      if (sp && +sp.price < amount) { amount = +sp.price; rule = sp.name || 'special'; out.special = { name: sp.name || 'special', price: +sp.price }; }
+      const sp = bestSpecial(f, start, end, !!val);
+      if (sp && (sp.flat || +sp.price < amount)) { amount = +sp.price; rule = sp.name || 'special'; out.special = { name: sp.name || 'special', price: +sp.price, flat: !!sp.flat }; }
       const before = amount;
       if (val) {
         if (val.type === 'percent') amount *= 1 - (+val.value || 0) / 100;
@@ -200,13 +210,16 @@
     function rateSummary(f) {
       const r = (f && f.rates) || {}, out = [], dn = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
       const t12 = x => { const m = hm(x), h = Math.floor(m / 60), mm = m % 60; return (h % 12 || 12) + (mm ? ':' + pad2(mm) : '') + (h < 12 ? 'am' : 'pm'); };
-      if (r.mode === 'table') (r.table || []).forEach(x => out.push(`Up to ${+x.upTo >= 60 ? (x.upTo / 60) + ' hr' + (x.upTo > 60 ? 's' : '') : x.upTo + ' min'}: ${money(x.price)}`));
+      // A flat daily rate (one table step covering the whole day, capped at that same price) reads as "$10.00 all day".
+      const tbl = (r.table || []).filter(x => +x.upTo > 0), flatDay = r.mode === 'table' && tbl.length === 1 && +tbl[0].upTo >= 1440 && (!(+r.dailyMax > 0) || +r.dailyMax === +tbl[0].price);
+      if (flatDay) out.push(`${money(tbl[0].price)} all day`);
+      else if (r.mode === 'table') (r.table || []).forEach(x => out.push(`Up to ${+x.upTo >= 60 ? (x.upTo / 60) + ' hr' + (x.upTo > 60 ? 's' : '') : x.upTo + ' min'}: ${money(x.price)}`));
       else { const inc = incOf(r); out.push(`${money(inc.price)} per ${inc.min === 60 ? 'hour' : inc.min + ' min'}`); }
-      if (+r.dailyMax > 0) out.push(`Daily max ${money(r.dailyMax)}${r.rolling ? ' per 24 hours' : ''}`);
+      if (+r.dailyMax > 0 && !flatDay) out.push(`Daily max ${money(r.dailyMax)}${r.rolling ? ' per 24 hours' : ''}`);
       (r.specials || []).filter(sp => sp.active !== false).forEach(sp => {
         const dd = (sp.days || []).map(Number), has = a => a.length === dd.length && a.every(d => dd.includes(d));
         const days = sp.dates && sp.dates.length ? sp.dates.join(', ') : has([0, 1, 2, 3, 4, 5, 6]) ? 'Every day' : has([1, 2, 3, 4, 5]) ? 'Mon–Fri' : has([0, 6]) ? 'Sat–Sun' : dd.map(d => dn[d]).join(', ');
-        out.push(`${sp.name}: ${money(sp.price)} · in ${t12(sp.enterFrom || '00:00')}–${t12(sp.enterUntil || '23:59')}${sp.exitBy ? ', out by ' + t12(sp.exitBy) + (sp.exitNextDay ? ' next day' : '') : ''}${days ? ' · ' + days : ''}`);
+        out.push(`${sp.name}: ${money(sp.price)}${sp.flat ? ' flat' : ''} · in ${t12(sp.enterFrom || '00:00')}–${t12(sp.enterUntil || '23:59')}${sp.exitBy ? ', out by ' + t12(sp.exitBy) + (sp.exitNextDay ? ' next day' : '') : ''}${days ? ' · ' + days : ''}`);
       });
       if (+r.graceMin > 0) out.push(`First ${r.graceMin} min free`);
       return out;
@@ -230,6 +243,15 @@
       return charge(facFor(s), s.startAt, end || s.endAt || now(), s.validation);
     }
     const needsReview = s => !!(s.matchedBy && !s.matchConfirmed);
+    /* What an open ticket can be paid at the entrance on an event night: the flat event price less anything already
+       paid, even inside the grace period, so attendants collect it as the car comes in. 0 when no flat event applies
+       (validated stays pay regular rates after their free time, so they are left to pay on exit). */
+    function entryDue(s) {
+      if (!s || s.endAt || s.mode === 'prepaid' || freeKind(s) || s.validation) return 0;
+      const ev = eventAt(facFor(s), s.startAt);
+      if (!ev || !ev.flat) return 0;
+      return Math.max(0, round2(+ev.price + extrasOf(s) + (+s.lateFee || 0) - paidOf(s)));
+    }
     const balanceOf = s => (s.waived || s.cited || (s.missedExit && !s.missedResolved) || needsReview(s)) ? 0 : Math.max(0, round2(sessionFee(s) + (+s.lateFee || 0) + extrasOf(s) - paidOf(s)));
     /* Full bill for a ticket: parking breakdown, extras, late fee, payments, balance, tax. */
     function ticketBill(s, end) {
@@ -246,6 +268,31 @@
     const occupancy = f => Math.max(0, Math.min(+f.capacity || Infinity, (+f.baseline || 0) + onSiteSessions(f).length));
     const permitValid = p => p.status === 'active' && (!p.endAt || p.endAt > now());
     const permitCovers = (p, facId) => { const t = ptype(p.permitTypeId); if (!t) return false; const fs = t.facilities || []; return !fs.length || fs.includes(facId); };
+    /* Spaces at a location right now, counting monthly parkers. Every active monthly parker holds a space at their
+       plan's location (its first location when a plan covers several), parked or not. A monthly car the cameras see
+       inside its own location is part of that hold, so it is not counted twice; any other car inside is a visitor.
+       available = capacity − visitors − monthly − count adjustment. */
+    const homeOf = p => { const t = ptype(p.permitTypeId); return (t && (t.facilities || [])[0]) || null; };
+    function spaceUse(f) {
+      const cap = +f.capacity || 0, adj = +f.baseline || 0, on = onSiteSessions(f);
+      const mine = new Set(L('permits').filter(p => permitValid(p) && homeOf(p) === f.id).map(p => p.id));
+      const monthlyInside = on.filter(s => s.kind === 'permit' && mine.has(s.permitId)).length;
+      const visitors = on.length - monthlyInside, monthly = mine.size, used = Math.max(0, visitors + monthly + adj);
+      return { capacity: cap, visitors, monthly, monthlyInside, adjustment: adj, used, available: Math.max(0, cap - used), pct: cap ? used / cap : 0 };
+    }
+    /* Cars that use the same validation code again and again: visits per code and plate over the last N days
+       (Settings; default 3 or more visits in 7 days). A flag for someone to review, never a refusal. */
+    function repeatValidations() {
+      const c = cfg(), min = Math.max(2, Math.round(+c.repeatValidationCount || 3)), days = Math.max(1, Math.round(+c.repeatValidationDays || 7)), since = now() - days * D;
+      const by = new Map();
+      L('sessions').forEach(s => {
+        const v = s.validation; if (!v || !v.code || !(s.startAt >= since) || !s.plate || s.noPlate) return;
+        const pl = normPlate(s.plate), k = v.code + '|' + pl;
+        const e = by.get(k) || { code: v.code, plate: pl, business: v.tenantName || v.department || v.name || '', sessions: [], last: 0 };
+        e.sessions.push(s.id); e.last = Math.max(e.last, s.startAt); by.set(k, e);
+      });
+      return [...by.values()].filter(e => e.sessions.length >= min).map(e => Object.assign(e, { count: e.sessions.length, days, min })).sort((a, b) => b.count - a.count || b.last - a.last);
+    }
     const permitsForPlate = pl => L('permits').filter(p => (p.plates || []).map(normPlate).includes(pl));
     const validPermitFor = (pl, facId) => L('permits').filter(permitValid).find(p => (p.plates || []).map(normPlate).includes(pl) && permitCovers(p, facId));
     const memberForPlate = pl => L('members').find(m => (m.plates || []).map(normPlate).includes(pl));
@@ -522,6 +569,9 @@
       if (s.endAt && s.fee != null && balanceOf(s) <= 0 && paidOf(s) > 0) return { error: 'This ticket is already paid in full. Refund it instead of validating it.' };
       const fv = findValidation(code, s.facilityId); if (fv.error) return fv;
       const v = fv.v, t = fv.t;
+      // On event nights only codes marked for event nights work; the rest are refused for that stay.
+      const ev = eventAt(facFor(s), s.startAt);
+      if (ev && !v.eventNights) return { error: 'This code doesn’t work on event nights (' + (ev.name || 'event') + ').' };
       const val = { code: v.code, name: v.name || '', type: v.type, value: v.value, department: v.department || (t ? t.name : ''), tenantId: t ? t.id : null, tenantName: t ? t.name : null, at: now(), source: source || 'portal', by: o.by || '' };
       const data = { validation: val, validationHistory: (s.validationHistory || []).concat([Object.assign({}, val, s.validation ? { replaced: s.validation.code, reason: String(o.reason || '') } : {})]).slice(-20),
         history: histAdd(s, { action: s.validation ? 'validation_replaced' : 'validation_applied', by: o.by, detail: (s.validation ? s.validation.code + ' → ' : '') + v.code + ' (' + validationText(v) + ')' + (o.reason ? ' · ' + o.reason : '') }) };
@@ -611,7 +661,7 @@
         if (!s) return { error: 'Ticket not found.' };
         if (s.endAt && s.missedExit && !s.missedResolved) return { error: 'Resolve the missed exit first (bill a day or close with no charge).' };
         if (needsReview(s)) return { error: 'Confirm the plate match first.' };
-        const due = balanceOf(s), amt = a.amount != null && a.amount !== '' ? round2(a.amount) : due;
+        const due = Math.max(balanceOf(s), entryDue(s)), amt = a.amount != null && a.amount !== '' ? round2(a.amount) : due;
         if (!(amt > 0)) return { error: 'Nothing is owed on this ticket.' };
         if (amt > due + 0.005) return { error: 'That is more than the ' + money(due) + ' owed.' };
         const t = now(), method = METHODS[a.method] ? a.method : 'cash';
@@ -755,6 +805,7 @@
         const pl = normPlate(a.plate), f = fac(a.facilityId), t = now();
         if (!pl) return { error: 'Enter your license plate.' };
         if (!f || f.active === false) return { error: 'Choose where you are parked.' };
+        if (f.onlinePrepay === false) return { error: f.name + ' charges you when you leave, so there’s nothing to pay ahead.' };
         const live = liveForPlate(pl, f.id), from = live && live.paidUntil > t ? live.paidUntil : t, fx = live ? facFor(live) : f;
         let until;
         if (a.untilEndOfDay) until = nextDayStart(dayStart(from, fx), fx);
@@ -947,7 +998,7 @@
       };
     }
 
-    return { newMonthlyNumber, accountRoom, accountUsed, planAccountParkers, ROLES, ROLE_NAMES, METHODS, can, canonRole, ticketOf, ticketNo, snapRates, facFor, histAdd, endOfDate, ticketBill, extrasOf, freeKind, validPermitFor, vipForPlate, sessionsForCode, codeOccupancy, arAging, vehicleProfile, validationText, staleHours, TICKET, prorate, priceDetail, rateSummary, taxOf, specialQualifies, monthBounds, planMonthlyDue, sessionByToken, needsReview, cfg, plateDebt, isHot, hotList, planCollections, resAvailability, reservationFor, activeReservation, planNoShows, resActive, resPlates, M, H, D, normPlate, canon, uid, round2, money, sum, now, fac, ptype, tenant, camera, tzOf, dayStart, nextDayStart, charge, paidOf, sessionFee, balanceOf, isLive, onSiteSessions, occupancy, permitValid, permitCovers, permitsForPlate, memberForPlate, soldOf, unpaidSessions, exitStatus, findLive, planRead, checkPlate, findValidation, planApplyValidation, sessionsForTenant, concurrency, tenantDays, PORTAL, lookup, quote, liveForPlate };
+    return { newMonthlyNumber, accountRoom, accountUsed, planAccountParkers, ROLES, ROLE_NAMES, METHODS, can, canonRole, ticketOf, ticketNo, snapRates, facFor, histAdd, endOfDate, ticketBill, extrasOf, freeKind, validPermitFor, vipForPlate, sessionsForCode, codeOccupancy, arAging, vehicleProfile, validationText, staleHours, TICKET, prorate, priceDetail, rateSummary, taxOf, specialQualifies, monthBounds, planMonthlyDue, sessionByToken, needsReview, cfg, plateDebt, isHot, hotList, planCollections, resAvailability, reservationFor, activeReservation, planNoShows, resActive, resPlates, M, H, D, normPlate, canon, uid, round2, money, sum, now, fac, ptype, tenant, camera, tzOf, dayStart, nextDayStart, charge, paidOf, sessionFee, balanceOf, isLive, onSiteSessions, occupancy, spaceUse, homeOf, repeatValidations, isEvent, eventAt, entryDue, permitValid, permitCovers, permitsForPlate, memberForPlate, soldOf, unpaidSessions, exitStatus, findLive, planRead, checkPlate, findValidation, planApplyValidation, sessionsForTenant, concurrency, tenantDays, PORTAL, lookup, quote, liveForPlate };
   }
   Rules.normPlate = normPlate; Rules.ROLES = ROLES; Rules.ROLE_NAMES = ROLE_NAMES; Rules.can = can; Rules.canonRole = canonRole; Rules.METHODS = METHODS;
   if (typeof module !== 'undefined' && module.exports) module.exports = Rules; else root.ParkRules = Rules;

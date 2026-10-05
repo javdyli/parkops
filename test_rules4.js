@@ -91,7 +91,7 @@ assert.strictEqual(R.exitStatus(get(t1.id)), 'waived');
 NOW = T0 + 2 * H;
 r = R.TICKET.create({ plate: 'XYZ9', facilityId: 'g3', startAt: NOW - 4 * H }); apply(r.ops); const t2 = get(r.sessionId);
 assert.ok(/needs a manager/.test(R.TICKET.close(t2, { at: NOW - H, by: 'Att' }).error), 'attendant cannot backdate a close by an hour');
-r = R.TICKET.close(t2, { at: NOW - H, reason: 'let out, system down', by: 'Att', allowBackdate: true }); assert.ok(!r.error, r.error); apply(r.ops);
+r = R.TICKET.close(t2, { at: NOW - H, reason: 'let out, system down', by: 'Att', allowBackdate: true, allowUnpaid: true }); assert.ok(!r.error, r.error); apply(r.ops);
 assert.strictEqual(get(t2.id).fee, 25); assert.strictEqual(r.balance, 25); assert.strictEqual(R.exitStatus(get(t2.id)), 'unpaid');
 assert.strictEqual(R.TICKET.close(get(t2.id), {}).error, 'This ticket is already closed.');
 // plate correction, note

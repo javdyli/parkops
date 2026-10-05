@@ -282,6 +282,13 @@ tr.click:hover td{background:var(--surface-2)}
 /* phones and tablets: no double-tap zoom on buttons, finger-sized targets, and 16px fields so iOS doesn't zoom in when one is tapped */
 button,[data-act],select,summary,label{touch-action:manipulation}
 @media (pointer:coarse){.btn{min-height:44px}.btn.sm{min-height:38px}.seg button{min-height:40px}input,select,textarea{font-size:16px}}
+/* Vendor credit under every page (driver portal and console) */
+.powered{text-align:center;font-size:.75rem;color:var(--muted);padding:20px 16px 28px}
+@media print{.powered{display:none}}
+.dropzone{display:grid;gap:4px;place-items:center;text-align:center;border:2px dashed var(--line);border-radius:10px;padding:22px 14px;cursor:pointer;background:var(--surface-2)}
+.dropzone:hover,.dropzone.over{border-color:var(--accent);background:color-mix(in srgb,var(--accent) 8%,var(--surface))}
+.dropzone:focus-within{outline:2px solid var(--accent);outline-offset:2px}
+.sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
 </style>
 
 <style>[hidden]{display:none!important}html,body{margin:0}</style></head><body>
@@ -299,6 +306,7 @@ button,[data-act],select,summary,label{touch-action:manipulation}
   <nav class="tabs" id="tabs" role="tablist" aria-label="Operations sections" hidden></nav>
 </header>
 <main id="main"><div class="skel">Loading your parking data…</div></main>
+<footer class="powered" id="powered">Powered by Avid Parking Systems</footer>
 <dialog id="dlg"><form id="dlgForm" novalidate></form></dialog>
 <div class="toast" id="toast" hidden></div>
 <script>
@@ -469,9 +477,19 @@ button,[data-act],select,summary,label{touch-action:manipulation}
       if (sp.exitAfter) { const e = hm(sp.exitAfter); if (end < zoned(p.year, p.month, p.day, Math.floor(e / 60), e % 60, tz)) return false; }
       return true;
     }
-    function bestSpecial(f, start, end) {
-      const list = ((f && f.rates && f.rates.specials) || []).filter(sp => specialQualifies(sp, f, start, end));
-      return list.sort((a, b) => a.price - b.price)[0] || null;
+    /* Event nights are specials with event dates. A flat special ("charge exactly this price") wins even when the
+       regular rate would be lower: that is how a $25 event rate is collected at the entrance. A stay belongs to an
+       event night when the car entered inside the event's window, however long it then stays. A validated stay is
+       priced without event specials: the code's free time comes off, then the regular rates apply. */
+    const isEvent = sp => !!(sp && Array.isArray(sp.dates) && sp.dates.length);
+    function eventAt(f, start) {
+      if (!start) return null;
+      return ((f && f.rates && f.rates.specials) || []).find(sp => sp.active !== false && isEvent(sp) && specialQualifies(Object.assign({}, sp, { exitBy: null, exitAfter: null, minStayMin: 0 }), f, start, start + M)) || null;
+    }
+    function bestSpecial(f, start, end, skipEvents) {
+      const list = ((f && f.rates && f.rates.specials) || []).filter(sp => !(skipEvents && isEvent(sp)) && specialQualifies(sp, f, start, end));
+      const flat = list.filter(sp => sp.flat).sort((a, b) => a.price - b.price)[0];
+      return flat || list.sort((a, b) => a.price - b.price)[0] || null;
     }
     /* Price of a stay with the full breakdown: parking days, special applied, validation effect.
        Validation types: hours (free time from the original arrival), percent, dollar (amount off), fixed (pay at
@@ -487,8 +505,8 @@ button,[data-act],select,summary,label{touch-action:manipulation}
       const days = [];
       const std = standard(f, eff, end, days, start);
       let amount = std, rule = 'standard';
-      const sp = bestSpecial(f, start, end);
-      if (sp && +sp.price < amount) { amount = +sp.price; rule = sp.name || 'special'; out.special = { name: sp.name || 'special', price: +sp.price }; }
+      const sp = bestSpecial(f, start, end, !!val);
+      if (sp && (sp.flat || +sp.price < amount)) { amount = +sp.price; rule = sp.name || 'special'; out.special = { name: sp.name || 'special', price: +sp.price, flat: !!sp.flat }; }
       const before = amount;
       if (val) {
         if (val.type === 'percent') amount *= 1 - (+val.value || 0) / 100;
@@ -504,13 +522,16 @@ button,[data-act],select,summary,label{touch-action:manipulation}
     function rateSummary(f) {
       const r = (f && f.rates) || {}, out = [], dn = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
       const t12 = x => { const m = hm(x), h = Math.floor(m / 60), mm = m % 60; return (h % 12 || 12) + (mm ? ':' + pad2(mm) : '') + (h < 12 ? 'am' : 'pm'); };
-      if (r.mode === 'table') (r.table || []).forEach(x => out.push(`Up to ${+x.upTo >= 60 ? (x.upTo / 60) + ' hr' + (x.upTo > 60 ? 's' : '') : x.upTo + ' min'}: ${money(x.price)}`));
+      // A flat daily rate (one table step covering the whole day, capped at that same price) reads as "$10.00 all day".
+      const tbl = (r.table || []).filter(x => +x.upTo > 0), flatDay = r.mode === 'table' && tbl.length === 1 && +tbl[0].upTo >= 1440 && (!(+r.dailyMax > 0) || +r.dailyMax === +tbl[0].price);
+      if (flatDay) out.push(`${money(tbl[0].price)} all day`);
+      else if (r.mode === 'table') (r.table || []).forEach(x => out.push(`Up to ${+x.upTo >= 60 ? (x.upTo / 60) + ' hr' + (x.upTo > 60 ? 's' : '') : x.upTo + ' min'}: ${money(x.price)}`));
       else { const inc = incOf(r); out.push(`${money(inc.price)} per ${inc.min === 60 ? 'hour' : inc.min + ' min'}`); }
-      if (+r.dailyMax > 0) out.push(`Daily max ${money(r.dailyMax)}${r.rolling ? ' per 24 hours' : ''}`);
+      if (+r.dailyMax > 0 && !flatDay) out.push(`Daily max ${money(r.dailyMax)}${r.rolling ? ' per 24 hours' : ''}`);
       (r.specials || []).filter(sp => sp.active !== false).forEach(sp => {
         const dd = (sp.days || []).map(Number), has = a => a.length === dd.length && a.every(d => dd.includes(d));
         const days = sp.dates && sp.dates.length ? sp.dates.join(', ') : has([0, 1, 2, 3, 4, 5, 6]) ? 'Every day' : has([1, 2, 3, 4, 5]) ? 'Mon–Fri' : has([0, 6]) ? 'Sat–Sun' : dd.map(d => dn[d]).join(', ');
-        out.push(`${sp.name}: ${money(sp.price)} · in ${t12(sp.enterFrom || '00:00')}–${t12(sp.enterUntil || '23:59')}${sp.exitBy ? ', out by ' + t12(sp.exitBy) + (sp.exitNextDay ? ' next day' : '') : ''}${days ? ' · ' + days : ''}`);
+        out.push(`${sp.name}: ${money(sp.price)}${sp.flat ? ' flat' : ''} · in ${t12(sp.enterFrom || '00:00')}–${t12(sp.enterUntil || '23:59')}${sp.exitBy ? ', out by ' + t12(sp.exitBy) + (sp.exitNextDay ? ' next day' : '') : ''}${days ? ' · ' + days : ''}`);
       });
       if (+r.graceMin > 0) out.push(`First ${r.graceMin} min free`);
       return out;
@@ -534,6 +555,15 @@ button,[data-act],select,summary,label{touch-action:manipulation}
       return charge(facFor(s), s.startAt, end || s.endAt || now(), s.validation);
     }
     const needsReview = s => !!(s.matchedBy && !s.matchConfirmed);
+    /* What an open ticket can be paid at the entrance on an event night: the flat event price less anything already
+       paid, even inside the grace period, so attendants collect it as the car comes in. 0 when no flat event applies
+       (validated stays pay regular rates after their free time, so they are left to pay on exit). */
+    function entryDue(s) {
+      if (!s || s.endAt || s.mode === 'prepaid' || freeKind(s) || s.validation) return 0;
+      const ev = eventAt(facFor(s), s.startAt);
+      if (!ev || !ev.flat) return 0;
+      return Math.max(0, round2(+ev.price + extrasOf(s) + (+s.lateFee || 0) - paidOf(s)));
+    }
     const balanceOf = s => (s.waived || s.cited || (s.missedExit && !s.missedResolved) || needsReview(s)) ? 0 : Math.max(0, round2(sessionFee(s) + (+s.lateFee || 0) + extrasOf(s) - paidOf(s)));
     /* Full bill for a ticket: parking breakdown, extras, late fee, payments, balance, tax. */
     function ticketBill(s, end) {
@@ -550,6 +580,31 @@ button,[data-act],select,summary,label{touch-action:manipulation}
     const occupancy = f => Math.max(0, Math.min(+f.capacity || Infinity, (+f.baseline || 0) + onSiteSessions(f).length));
     const permitValid = p => p.status === 'active' && (!p.endAt || p.endAt > now());
     const permitCovers = (p, facId) => { const t = ptype(p.permitTypeId); if (!t) return false; const fs = t.facilities || []; return !fs.length || fs.includes(facId); };
+    /* Spaces at a location right now, counting monthly parkers. Every active monthly parker holds a space at their
+       plan's location (its first location when a plan covers several), parked or not. A monthly car the cameras see
+       inside its own location is part of that hold, so it is not counted twice; any other car inside is a visitor.
+       available = capacity − visitors − monthly − count adjustment. */
+    const homeOf = p => { const t = ptype(p.permitTypeId); return (t && (t.facilities || [])[0]) || null; };
+    function spaceUse(f) {
+      const cap = +f.capacity || 0, adj = +f.baseline || 0, on = onSiteSessions(f);
+      const mine = new Set(L('permits').filter(p => permitValid(p) && homeOf(p) === f.id).map(p => p.id));
+      const monthlyInside = on.filter(s => s.kind === 'permit' && mine.has(s.permitId)).length;
+      const visitors = on.length - monthlyInside, monthly = mine.size, used = Math.max(0, visitors + monthly + adj);
+      return { capacity: cap, visitors, monthly, monthlyInside, adjustment: adj, used, available: Math.max(0, cap - used), pct: cap ? used / cap : 0 };
+    }
+    /* Cars that use the same validation code again and again: visits per code and plate over the last N days
+       (Settings; default 3 or more visits in 7 days). A flag for someone to review, never a refusal. */
+    function repeatValidations() {
+      const c = cfg(), min = Math.max(2, Math.round(+c.repeatValidationCount || 3)), days = Math.max(1, Math.round(+c.repeatValidationDays || 7)), since = now() - days * D;
+      const by = new Map();
+      L('sessions').forEach(s => {
+        const v = s.validation; if (!v || !v.code || !(s.startAt >= since) || !s.plate || s.noPlate) return;
+        const pl = normPlate(s.plate), k = v.code + '|' + pl;
+        const e = by.get(k) || { code: v.code, plate: pl, business: v.tenantName || v.department || v.name || '', sessions: [], last: 0 };
+        e.sessions.push(s.id); e.last = Math.max(e.last, s.startAt); by.set(k, e);
+      });
+      return [...by.values()].filter(e => e.sessions.length >= min).map(e => Object.assign(e, { count: e.sessions.length, days, min })).sort((a, b) => b.count - a.count || b.last - a.last);
+    }
     const permitsForPlate = pl => L('permits').filter(p => (p.plates || []).map(normPlate).includes(pl));
     const validPermitFor = (pl, facId) => L('permits').filter(permitValid).find(p => (p.plates || []).map(normPlate).includes(pl) && permitCovers(p, facId));
     const memberForPlate = pl => L('members').find(m => (m.plates || []).map(normPlate).includes(pl));
@@ -826,6 +881,9 @@ button,[data-act],select,summary,label{touch-action:manipulation}
       if (s.endAt && s.fee != null && balanceOf(s) <= 0 && paidOf(s) > 0) return { error: 'This ticket is already paid in full. Refund it instead of validating it.' };
       const fv = findValidation(code, s.facilityId); if (fv.error) return fv;
       const v = fv.v, t = fv.t;
+      // On event nights only codes marked for event nights work; the rest are refused for that stay.
+      const ev = eventAt(facFor(s), s.startAt);
+      if (ev && !v.eventNights) return { error: 'This code doesn’t work on event nights (' + (ev.name || 'event') + ').' };
       const val = { code: v.code, name: v.name || '', type: v.type, value: v.value, department: v.department || (t ? t.name : ''), tenantId: t ? t.id : null, tenantName: t ? t.name : null, at: now(), source: source || 'portal', by: o.by || '' };
       const data = { validation: val, validationHistory: (s.validationHistory || []).concat([Object.assign({}, val, s.validation ? { replaced: s.validation.code, reason: String(o.reason || '') } : {})]).slice(-20),
         history: histAdd(s, { action: s.validation ? 'validation_replaced' : 'validation_applied', by: o.by, detail: (s.validation ? s.validation.code + ' → ' : '') + v.code + ' (' + validationText(v) + ')' + (o.reason ? ' · ' + o.reason : '') }) };
@@ -915,7 +973,7 @@ button,[data-act],select,summary,label{touch-action:manipulation}
         if (!s) return { error: 'Ticket not found.' };
         if (s.endAt && s.missedExit && !s.missedResolved) return { error: 'Resolve the missed exit first (bill a day or close with no charge).' };
         if (needsReview(s)) return { error: 'Confirm the plate match first.' };
-        const due = balanceOf(s), amt = a.amount != null && a.amount !== '' ? round2(a.amount) : due;
+        const due = Math.max(balanceOf(s), entryDue(s)), amt = a.amount != null && a.amount !== '' ? round2(a.amount) : due;
         if (!(amt > 0)) return { error: 'Nothing is owed on this ticket.' };
         if (amt > due + 0.005) return { error: 'That is more than the ' + money(due) + ' owed.' };
         const t = now(), method = METHODS[a.method] ? a.method : 'cash';
@@ -1059,6 +1117,7 @@ button,[data-act],select,summary,label{touch-action:manipulation}
         const pl = normPlate(a.plate), f = fac(a.facilityId), t = now();
         if (!pl) return { error: 'Enter your license plate.' };
         if (!f || f.active === false) return { error: 'Choose where you are parked.' };
+        if (f.onlinePrepay === false) return { error: f.name + ' charges you when you leave, so there’s nothing to pay ahead.' };
         const live = liveForPlate(pl, f.id), from = live && live.paidUntil > t ? live.paidUntil : t, fx = live ? facFor(live) : f;
         let until;
         if (a.untilEndOfDay) until = nextDayStart(dayStart(from, fx), fx);
@@ -1251,7 +1310,7 @@ button,[data-act],select,summary,label{touch-action:manipulation}
       };
     }
 
-    return { newMonthlyNumber, accountRoom, accountUsed, planAccountParkers, ROLES, ROLE_NAMES, METHODS, can, canonRole, ticketOf, ticketNo, snapRates, facFor, histAdd, endOfDate, ticketBill, extrasOf, freeKind, validPermitFor, vipForPlate, sessionsForCode, codeOccupancy, arAging, vehicleProfile, validationText, staleHours, TICKET, prorate, priceDetail, rateSummary, taxOf, specialQualifies, monthBounds, planMonthlyDue, sessionByToken, needsReview, cfg, plateDebt, isHot, hotList, planCollections, resAvailability, reservationFor, activeReservation, planNoShows, resActive, resPlates, M, H, D, normPlate, canon, uid, round2, money, sum, now, fac, ptype, tenant, camera, tzOf, dayStart, nextDayStart, charge, paidOf, sessionFee, balanceOf, isLive, onSiteSessions, occupancy, permitValid, permitCovers, permitsForPlate, memberForPlate, soldOf, unpaidSessions, exitStatus, findLive, planRead, checkPlate, findValidation, planApplyValidation, sessionsForTenant, concurrency, tenantDays, PORTAL, lookup, quote, liveForPlate };
+    return { newMonthlyNumber, accountRoom, accountUsed, planAccountParkers, ROLES, ROLE_NAMES, METHODS, can, canonRole, ticketOf, ticketNo, snapRates, facFor, histAdd, endOfDate, ticketBill, extrasOf, freeKind, validPermitFor, vipForPlate, sessionsForCode, codeOccupancy, arAging, vehicleProfile, validationText, staleHours, TICKET, prorate, priceDetail, rateSummary, taxOf, specialQualifies, monthBounds, planMonthlyDue, sessionByToken, needsReview, cfg, plateDebt, isHot, hotList, planCollections, resAvailability, reservationFor, activeReservation, planNoShows, resActive, resPlates, M, H, D, normPlate, canon, uid, round2, money, sum, now, fac, ptype, tenant, camera, tzOf, dayStart, nextDayStart, charge, paidOf, sessionFee, balanceOf, isLive, onSiteSessions, occupancy, spaceUse, homeOf, repeatValidations, isEvent, eventAt, entryDue, permitValid, permitCovers, permitsForPlate, memberForPlate, soldOf, unpaidSessions, exitStatus, findLive, planRead, checkPlate, findValidation, planApplyValidation, sessionsForTenant, concurrency, tenantDays, PORTAL, lookup, quote, liveForPlate };
   }
   Rules.normPlate = normPlate; Rules.ROLES = ROLES; Rules.ROLE_NAMES = ROLE_NAMES; Rules.can = can; Rules.canonRole = canonRole; Rules.METHODS = METHODS;
   if (typeof module !== 'undefined' && module.exports) module.exports = Rules; else root.ParkRules = Rules;
@@ -1465,6 +1524,8 @@ const $=(s,r=document)=>r.querySelector(s);
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const money=n=>(n<0?'-':'')+'$'+Math.abs(Math.round((+n||0)*100)/100).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
 const money0=n=>'$'+Math.round(+n||0).toLocaleString('en-US');
+/* Prices people pay (monthly plans): whole dollars when the price is whole, otherwise to the cent ($178.61, not $179). */
+const moneyP=n=>Math.abs((+n||0)-Math.round(+n||0))<0.005?money0(n):money(n);
 const normPlate=ParkRules.normPlate;
 const now=()=>Date.now();
 const M=6e4,H=36e5,D=864e5;
@@ -1505,7 +1566,7 @@ const can=p=>S.perms.has(p);
 const setRole=r=>{S.role=ParkRules.canonRole(r||'viewer');S.perms=new Set(ParkRules.ROLES[S.role]||[])};
 const actorName=()=>(HOSTED&&HOSTED.user&&HOSTED.user.name)||store.get('officer')||'Staff';
 /* Which permission each button or form needs. The server checks the same table; this only greys things out. */
-const ACT_PERM={editFacility:'facilities',editRates:'facilities',makeSign:'facilities',recount:'facilities',editTenant:'validations',editValidation:'validations',toggleValidation:'validations',editType:'monthly',issuePermit:'monthly',approvePermit:'monthly',denyPermit:'monthly',reinstatePermit:'monthly',officePaid:'monthly',endMonthly:'monthly',editPermit:'monthly',editCompany:'monthly',acctAdd:'monthly',acctBulk:'monthly',sendCompanyLink:'monthly',runBilling:'monthly',invoicePaid:'monthly',importMonthly:'import',editCamera:'cameras',citePaid:'citations.decide',citeVoid:'citations.decide',appealDecide:'citations.decide',citeSession:'citations',addViolation:'settings',clearSamples:'settings',refreshSamples:'settings',pruneSessions:'settings',removeMember:'monthly',staffCancelRes:'reservations',refund:'refunds',addUser:'users',editUser:'users',backupNow:'settings',markSessionPaid:'tickets',waiveSession:'tickets.adjust',closeSession:'tickets',validateSession:'tickets',closeMissed:'tickets.adjust',confirmMatch:'tickets.adjust',rejectMatch:'tickets.adjust',missedBill:'tickets.adjust',missedFree:'tickets.adjust'};
+const ACT_PERM={impRun:'cameras',editFacility:'facilities',editRates:'facilities',makeSign:'facilities',recount:'facilities',editTenant:'validations',editValidation:'validations',toggleValidation:'validations',editType:'monthly',issuePermit:'monthly',approvePermit:'monthly',denyPermit:'monthly',reinstatePermit:'monthly',officePaid:'monthly',endMonthly:'monthly',editPermit:'monthly',editCompany:'monthly',acctAdd:'monthly',acctBulk:'monthly',sendCompanyLink:'monthly',runBilling:'monthly',invoicePaid:'monthly',importMonthly:'import',editCamera:'cameras',citePaid:'citations.decide',citeVoid:'citations.decide',appealDecide:'citations.decide',citeSession:'citations',addViolation:'settings',clearSamples:'settings',refreshSamples:'settings',pruneSessions:'settings',removeMember:'monthly',staffCancelRes:'reservations',refund:'refunds',addUser:'users',editUser:'users',backupNow:'settings',markSessionPaid:'tickets',waiveSession:'tickets.adjust',closeSession:'tickets',validateSession:'tickets',closeMissed:'tickets.adjust',confirmMatch:'tickets.adjust',rejectMatch:'tickets.adjust',missedBill:'tickets.adjust',missedFree:'tickets.adjust'};
 const FORM_PERM={settings:'settings',violations:'settings',lprRead:'cameras',cite:'citations'};
 /* One entry point for every ticket action, in both builds. Hosted: the server runs the planner and checks the role. */
 async function ticketAction(id,action,args,okMsg){
@@ -1598,7 +1659,7 @@ function render(){
   if(S.roles&&!S.roles.includes(UI.role))UI.role=S.roles[0];
   const rolesEl=$('.roles');rolesEl.hidden=!S.roles||S.roles.length<2;
   document.querySelectorAll('.roles button').forEach(b=>{b.hidden=!(S.roles||[]).includes(b.dataset.role);b.setAttribute('aria-pressed',b.dataset.role===UI.role)});
-  $('#campusName').textContent=campusName();$('#brandSub').textContent=canEditOps()?(HOSTED?ParkRules.ROLE_NAMES[S.role]||'Parking operations':'Parking operations'):'Parking services';
+  $('#campusName').textContent=campusName();if(document.title!==campusName())document.title=campusName();$('#brandSub').textContent=canEditOps()?(HOSTED?ParkRules.ROLE_NAMES[S.role]||'Parking operations':'Parking operations'):'Parking services';
   applyBrand();
   if(!tabAllowed(UI.tab))UI.tab='overview';
   renderTabs();
@@ -1703,7 +1764,8 @@ function attentionItems(){
   if(noEntry.length)it.push({sev:'warn',t:`${noEntry.length} exit${noEntry.length>1?'s':''} in the last 24 hours had no matching entry read`,go:'review'});
   if(stale.length)it.push({sev:'warn',t:`${stale.length} vehicle${stale.length>1?'s have':' has'} been on site over ${R.staleHours()} hours. Check for missed exit reads.`,go:'review'});
   S.tenants.forEach(t=>{const d=R.tenantDays(t,1)[0];if(d&&d.over>0)it.push({sev:'bad',t:`${t.name} valet is ${d.over} over its ${t.allotment}-space allotment today (peak ${d.peak})`,go:'tenants',tenant:t.id})});
-  S.facilities.forEach(f=>{const p=R.occupancy(f)/(+f.capacity||1);if(p>=.9)it.push({sev:'bad',t:`${f.name} is ${Math.round(p*100)}% full`,go:'activity',fac:f.id})});
+  const rep=R.repeatValidations();if(rep.length)it.push({sev:'warn',t:`${rep.length} car${rep.length>1?'s':''} used the same validation code ${rep[0].min}+ times in ${rep[0].days} days (most: ${rep[0].plate} with ${rep[0].code}${rep[0].business?' · '+rep[0].business:''}, ${rep[0].count} times)`,go:'tenants'});
+  S.facilities.forEach(f=>{if(!(+f.capacity>0))return;const u=R.spaceUse(f);if(u.pct>=.9)it.push({sev:'bad',t:`${f.name} is ${Math.round(u.pct*100)}% full (${u.available} open, ${u.monthly} held for monthly)`,go:'activity',fac:f.id})});
   if(wl.length)it.push({sev:'info',t:`${wl.length} driver${wl.length>1?'s':''} on a monthly waitlist`,go:'permits',f:'waitlist'});
   /* Availability: spaces that have opened up for people who are waiting. */
   if(wl.length){const waitBy={},usedBy={};wl.forEach(p=>{waitBy[p.permitTypeId]=(waitBy[p.permitTypeId]||0)+1});S.permits.forEach(p=>{if(p.status!=='waitlist'&&holdsSpace(p))usedBy[p.permitTypeId]=(usedBy[p.permitTypeId]||0)+1});
@@ -1712,7 +1774,7 @@ function attentionItems(){
 }
 function vOverview(){
   if(!S.facilities.length)return emptyFacilities();
-  const cap=sum(S.facilities,f=>f.capacity),occ=sum(S.facilities,R.occupancy);
+  const cap=sum(S.facilities,f=>f.capacity),occ=sum(S.facilities,R.occupancy);const uses=S.facilities.map(R.spaceUse),avail=sum(uses,u=>u.available),held=sum(uses,u=>u.monthly),usedAll=sum(uses,u=>u.used);
   const days=revenueByDay(7);const today=days[days.length-1];const tToday=today.parking+today.citations+today.permits;const t7=sum(days,d=>d.parking+d.citations+d.permits);
   const openC=S.citations.filter(c=>c.status==='open'||c.status==='appeal');
   const att=attentionItems();const pct=cap?Math.round(occ/cap*100):0;
@@ -1724,7 +1786,7 @@ function vOverview(){
   <div class="pagehead"><div><h1>${esc(campusName())}</h1><p>${new Date().toLocaleDateString([], {weekday:'long',month:'long',day:'numeric'})} · ${S.facilities.length} facilities · ${cap.toLocaleString()} spaces</p></div>
     <button class="btn" data-role-go="enf">Open officer view</button></div>
   <div class="kpis">
-    <div class="kpi"><small>Vehicles on site</small><b>${occ.toLocaleString()}</b><span class="num">${pct}% of ${cap.toLocaleString()} spaces</span></div>
+    <div class="kpi"><small>Spaces available</small><b>${avail.toLocaleString()}</b><span class="num">${occ.toLocaleString()} parked · ${held.toLocaleString()} held for monthly · ${cap?Math.round(usedAll/cap*100):0}% of ${cap.toLocaleString()} in use</span></div>
     <div class="kpi"><small>Revenue today</small><b>${money0(tToday)}</b><span>${money0(today.parking)} parking · ${money0(today.citations)} notices</span></div>
     <div class="kpi"><small>Last 7 days</small><b>${money0(t7)}</b><span>Parking, monthly and notices</span></div>
     <div class="kpi ${unpaidToday.length?'alert':''}"><small>Exits not charged today</small><b>${unpaidToday.length}</b><span>${money(sum(unpaidToday,R.balanceOf))} owed · ${exitsToday.length} exits today</span></div>
@@ -1732,7 +1794,7 @@ function vOverview(){
     <div class="kpi"><small>Open notices</small><b>${openC.length}</b><span>${money(sum(openC,c=>c.fine))} outstanding</span></div>
     <div class="kpi ${att.length?'alert':''}"><small>Needs attention</small><b>${att.length}</b><span>${att.length?'See list below':'All clear'}</span></div>
   </div>
-  <section class="panel"><div class="panel-h"><h2>Facilities right now</h2><span class="muted" style="font-size:.84rem">Garages count from lane cameras; QR lots count paid sessions</span></div>
+  <section class="panel"><div class="panel-h"><h2>Facilities right now</h2><span class="muted" style="font-size:.84rem">Open spaces after visitors and monthly parkers. Garages count visitors from lane cameras; QR lots count paid sessions</span></div>
     <div class="panel-b"><div class="facs">${S.facilities.map(facCard).join('')}</div></div></section>
   <div class="grid g2">
     <section class="panel"><div class="panel-h"><h2>Revenue, last 7 days</h2><div class="legend"><span><i style="background:var(--accent)"></i>Parking</span><span><i style="background:var(--ok)"></i>Monthly</span><span><i style="background:var(--stripe)"></i>Notices</span></div></div>
@@ -1743,11 +1805,11 @@ function vOverview(){
   <section class="panel"><div class="panel-h"><h2>Latest camera reads</h2><button class="btn sm" data-act="goTab" data-tab="lpr">All reads</button></div>${feedTable(S.feed.slice(0,6))}</section>`;
 }
 function facCard(f){
-  const o=R.occupancy(f),c=+f.capacity||0,p=c?o/c:0;const cls=p>=.9?'bad':p>=.75?'warn':'';
+  const u=R.spaceUse(f),c=u.capacity,p=u.pct;const cls=p>=.9?'bad':p>=.75?'warn':'';
   const ds=R.dayStart(now(),f);const ins=S.sessions.filter(s=>s.facilityId===f.id&&s.startAt>=ds).length,outs=S.sessions.filter(s=>s.facilityId===f.id&&s.endAt>=ds).length;
-  return `<button class="fac" data-act="goTab" data-tab="activity" data-fac="${f.id}"><div class="fac-top"><div><h3>${esc(f.name)}</h3><span class="tag">${f.type==='lot'?'Surface lot':'Garage'}</span> ${f.payMode==='qr'?`<span class="tag">QR pay${f.lotCode?' · '+esc(f.lotCode):''}</span>`:S.cameras.some(c=>c.facilityId===f.id)?`<span class="tag">${S.cameras.filter(c=>c.facilityId===f.id).length} lanes</span>`:'<span class="tag">No cameras</span>'}</div><div class="pct">${o.toLocaleString()}</div></div>
+  return `<button class="fac" data-act="goTab" data-tab="activity" data-fac="${f.id}"><div class="fac-top"><div><h3>${esc(f.name)}</h3><span class="tag">${f.type==='lot'?'Surface lot':'Garage'}</span> ${f.payMode==='qr'?`<span class="tag">QR pay${f.lotCode?' · '+esc(f.lotCode):''}</span>`:S.cameras.some(c=>c.facilityId===f.id)?`<span class="tag">${S.cameras.filter(c=>c.facilityId===f.id).length} lanes</span>`:'<span class="tag">No cameras</span>'}${f.active===false?' <span class="tag">Closed to drivers</span>':''}</div><div class="pct" title="Spaces open">${c?u.available.toLocaleString():'—'}<span class="muted" style="font-size:.7rem;display:block;text-align:right">open</span></div></div>
   <div class="bar ${cls}"><i style="width:${Math.min(100,p*100)}%"></i></div>
-  <div class="fac-meta num"><span>${Math.round(p*100)}% of ${c.toLocaleString()}</span><span>${ins} in · ${outs} out today</span></div></button>`;
+  <div class="fac-meta num"><span>${c?`${u.visitors} parked · ${u.monthly} monthly · ${Math.round(p*100)}% of ${c.toLocaleString()}`:'Enter the number of spaces'}</span><span>${ins} in · ${outs} out today</span></div></button>`;
 }
 function feedTable(rows){
   if(!rows.length)return '<div class="empty">No camera reads yet.</div>';
@@ -1762,7 +1824,7 @@ function vActivity(){
   if(!S.facilities.length)return emptyFacilities();
   if(!facById(UI.actFac))UI.actFac=(S.facilities.find(x=>x.payMode!=='qr')||S.facilities[0]).id;
   const f=facById(UI.actFac),tz=tzF(f),ds=R.dayStart(now(),f),de=R.nextDayStart(ds,f);
-  const on=R.onSiteSessions(f),occ=R.occupancy(f),cap=+f.capacity||0;
+  const on=R.onSiteSessions(f),occ=R.occupancy(f),cap=+f.capacity||0,u=R.spaceUse(f);
   const tracked=on.filter(s=>!s.noPlate).length,unknown=on.filter(s=>s.noPlate).length,adj=+f.baseline||0;
   const facS=S.sessions.filter(s=>s.facilityId===f.id);
   const conc=R.concurrency(facS.filter(s=>s.startAt&&!s.noEntry),ds,de);
@@ -1778,8 +1840,8 @@ function vActivity(){
     <select id="actFac" data-fresh="1" style="width:auto">${S.facilities.map(x=>`<option value="${x.id}" ${x.id===f.id?'selected':''}>${esc(x.name)}</option>`).join('')}</select></div>
   <div class="grid g2">
     <section class="panel"><div class="panel-h"><h2>In ${esc(f.name)} now</h2><button class="btn sm" data-act="recount" data-id="${f.id}">Enter a physical count</button></div><div class="panel-b" style="display:grid;gap:12px">
-      <div class="big-count"><b>${occ.toLocaleString()}</b><span>of ${cap.toLocaleString()} spaces · ${cap?Math.round(occ/cap*100):0}% full · ${Math.max(0,cap-occ).toLocaleString()} open</span></div>
-      <div class="bar ${occ/cap>=.9?'bad':occ/cap>=.75?'warn':''}"><i style="width:${cap?Math.min(100,occ/cap*100):0}%"></i></div>
+      <div class="big-count"><b>${u.available.toLocaleString()}</b><span>spaces open of ${cap.toLocaleString()} · ${u.visitors.toLocaleString()} visitors parked · ${u.monthly.toLocaleString()} held for monthly parkers (${u.monthlyInside} inside now) · ${cap?Math.round(u.pct*100):0}% in use</span></div>
+      <div class="bar ${u.pct>=.9?'bad':u.pct>=.75?'warn':''}"><i style="width:${cap?Math.min(100,u.pct*100):0}%"></i></div>
       <div class="split"><span><b>${tracked}</b> plates read in</span><span><b>${unknown}</b> no-plate entries</span><span><b>${adj>=0?'+':''}${adj}</b> count adjustment</span><span><b>${ins}</b> entries today</span><span><b>${outs}</b> exits today</span><span><b>${conc.peak+adj}</b> peak today at ${fmtTime(conc.peakAt,tz)}</span></div>
     </div></section>
     <section class="panel"><div class="panel-h"><h2>Charge check</h2><span class="muted" style="font-size:.84rem">${UI.auditRange==='today'?'Today':UI.auditRange==='yesterday'?'Yesterday':'Last 7 days'}</span></div><div class="panel-b"><div class="summary-row">
@@ -1822,13 +1884,16 @@ function vTenants(){
         <div class="chart">${peakBars(days,allot,tz)}</div></div>
       <div class="tbl-wrap"><table><thead><tr><th>Parking day</th><th class="r">Validated cars</th><th class="r">Peak</th><th>Peak time</th><th class="r">Over</th><th class="r">Charge</th></tr></thead><tbody>${[...days].reverse().filter(d=>d.cars||d.peak).map(d=>`<tr><td>${fmtDay(d.start+12*H,tz)}</td><td class="r num">${d.cars}</td><td class="r num">${d.peak}</td><td class="num">${d.peak?fmtTime(d.peakAt,tz):'—'}</td><td class="r num">${d.over?`<span class="pill bad">${d.over}</span>`:'0'}</td><td class="r num">${money(d.charge)}</td></tr>`).join('')||'<tr><td colspan="6" class="empty">No validated stays in the last 30 days.</td></tr>'}</tbody></table></div></section>`;
   }
+  const rep=R.repeatValidations(),tz0=tzF(S.facilities[0]);
+  const repPanel=rep.length?`<section class="panel"><div class="panel-h"><h2>Repeat use to review</h2><span class="muted" style="font-size:.84rem">The same car used the same code ${rep[0].min} or more times in ${rep[0].days} days. Change these numbers in Settings.</span></div><div class="tbl-wrap"><table><thead><tr><th>Plate</th><th>Code</th><th>Business</th><th class="r">Visits</th><th>Last visit</th></tr></thead><tbody>${rep.map(e=>`<tr><td>${plateChip(e.plate)}</td><td class="mono"><b>${esc(e.code)}</b></td><td>${esc(e.business)}</td><td class="r num">${e.count}</td><td class="num">${fmtTime(e.last,tz0)}</td></tr>`).join('')}</tbody></table></div></section>`:'';
   return `<div class="pagehead"><div><h1>Validations & tenants</h1><p>Validation codes, tenant allotments and how many validated cars were parked at once. Overage = cars over the allotment at the daily peak.</p></div><button class="btn" data-act="editValidation">New code</button><button class="btn pri" data-act="editTenant">Add tenant</button></div>
+  ${repPanel}
   <section class="panel"><div class="panel-h"><h2>Tenants</h2><span class="muted" style="font-size:.84rem">Select a tenant to see its valet report</span></div>
   ${ts.length?`<div class="tbl-wrap"><table><thead><tr><th>Tenant</th><th>Codes</th><th class="r">Allotment</th><th class="r">On site now</th><th class="r">Peak today</th><th class="r">Overage spaces, 30d</th><th class="r">Overage, 30d</th><th></th></tr></thead><tbody>${ts.map(tRow).join('')}</tbody></table></div>`:'<div class="empty">No tenants yet. Add one to issue its validation code and track its space allotment.</div>'}</section>
   ${report}
   <section class="panel"><div class="panel-h"><h2>All validation codes</h2></div>
   ${vals.length?`<div class="tbl-wrap"><table><thead><tr><th>Code</th><th>Tenant or department</th><th>Covers</th><th>Valid at</th><th class="r">Used</th><th>Can be used</th><th></th></tr></thead><tbody>${vals.map(v=>{const off=!v.active||(v.expiresAt&&v.expiresAt<now())||(v.validFrom&&v.validFrom>now())||(+v.maxUses&&v.uses>=v.maxUses);const tn=v.tenantId&&byId('tenants',v.tenantId);
-    return `<tr><td class="mono"><b>${esc(v.code)}</b>${v.name?`<span class="sub">${esc(v.name)}</span>`:''}</td><td>${esc(tn?tn.name:v.department)}</td><td>${esc(benefit(v))}</td><td>${esc(vfacs(v))}</td><td class="r num">${v.uses||0}${+v.maxUses?' / '+v.maxUses:''}</td><td class="num">${v.validFrom?fmtDate(v.validFrom)+' – ':''}${v.expiresAt?fmtDate(v.expiresAt):'no end date'} ${off?'<span class="pill">Inactive</span>':'<span class="pill ok">Active</span>'}</td><td><div class="acts"><button class="btn sm" data-act="editValidation" data-id="${v.id}">Edit</button><button class="btn sm" data-act="toggleValidation" data-id="${v.id}">${v.active?'Turn off':'Turn on'}</button></div></td></tr>`}).join('')}</tbody></table></div>`:'<div class="empty">No validation codes yet.</div>'}</section>
+    return `<tr><td class="mono"><b>${esc(v.code)}</b>${v.name?`<span class="sub">${esc(v.name)}</span>`:''}</td><td>${esc(tn?tn.name:v.department)}</td><td>${esc(benefit(v))}${v.eventNights?'<span class="sub">Works on event nights</span>':''}</td><td>${esc(vfacs(v))}</td><td class="r num">${v.uses||0}${+v.maxUses?' / '+v.maxUses:''}</td><td class="num">${v.validFrom?fmtDate(v.validFrom)+' – ':''}${v.expiresAt?fmtDate(v.expiresAt):'no end date'} ${off?'<span class="pill">Inactive</span>':'<span class="pill ok">Active</span>'}</td><td><div class="acts"><button class="btn sm" data-act="editValidation" data-id="${v.id}">Edit</button><button class="btn sm" data-act="toggleValidation" data-id="${v.id}">${v.active?'Turn off':'Turn on'}</button></div></td></tr>`}).join('')}</tbody></table></div>`:'<div class="empty">No validation codes yet.</div>'}</section>
   ${window.vCodeOccupancy?window.vCodeOccupancy():''}`;
 }
 function tenantForm(t){
@@ -1839,14 +1904,14 @@ function tenantForm(t){
     {id:'allotment',label:'Space allotment',type:'number',value:t.allotment??'',help:'Cars allowed at once. Leave blank if not limited.'},
     {id:'overageRate',label:'Overage charge ($ per space per day)',type:'number',step:'0.01',value:t.overageRate??''},
     {id:'contact',label:'Billing contact email',type:'email',value:t.contact},
-    ...(isNew?[{id:'code',label:'Validation code',value:uid('').slice(0,6),help:'Staff or valet enter this to validate a stay.'},{id:'hours',label:'Free hours per validation',type:'number',step:'0.25',value:2.5}]:[]),
+    ...(isNew?[{id:'code',label:'Validation code',value:uid('').slice(0,6),help:'Staff or valet enter this to validate a stay.'},{id:'hours',label:'Free hours per validation',type:'number',step:'0.25',value:2.5,help:'Use 24 for all day.'},{id:'eventNights',label:'Works on event nights',type:'select',options:[['0','No'],['1','Yes: free time, then regular rates']],value:'0'}]:[]),
   ],extra:isNew?'':`<button type="button" class="btn danger" data-dlg="delete">Delete tenant</button>`,
   onExtra:()=>write(db=>col(db,'tenants').doc(t.id).delete(),'Tenant deleted'),
   onSubmit:async v=>{const data={name:v.name.trim(),facilityId:v.facilityId,allotment:v.allotment===''?0:+v.allotment,overageRate:+v.overageRate||0,contact:v.contact.trim()};
     if(!isNew)return write(db=>col(db,'tenants').doc(t.id).update(data),'Tenant saved');
     const code=normPlate(v.code);if(code&&S.validations.some(x=>x.code===code))return 'That validation code is already in use.';
     const id=R.uid('t');const ok=await addDoc('tenants',Object.assign(data,{createdAt:now()}),id);
-    if(ok&&code)await addDoc('validations',{code,name:data.name+' validation',tenantId:id,department:data.name,type:'hours',value:+v.hours||2.5,maxUses:0,uses:0,active:true,validFrom:null,expiresAt:null,facilityIds:[],createdAt:now()});
+    if(ok&&code)await addDoc('validations',{code,name:data.name+' validation',tenantId:id,department:data.name,type:'hours',value:+v.hours||2.5,eventNights:v.eventNights==='1',maxUses:0,uses:0,active:true,validFrom:null,expiresAt:null,facilityIds:[],createdAt:now()});
     if(ok){UI.tenant=id;toast(`${data.name} added${code?' with code '+code:''}`)}return ok}});
 }
 const VAL_TYPES=[['hours','Free time (hours from arrival)'],['percent','Percent off'],['dollar','Dollars off'],['fixed','Fixed final price'],['full','Covers the full stay']];
@@ -1863,6 +1928,7 @@ function validationForm(v){
     {id:'validFrom',label:'Can be used from',type:'date',value:dIso(v.validFrom)},
     {id:'expiresAt',label:'Can be used until',type:'date',value:dIso(v.expiresAt),help:'When the code stops working. Separate from how much parking it covers.'},
     {id:'facilityIds',label:'Valid at',type:'checks',options:S.facilities.map(f=>[f.id,f.name]),value:v.facilityIds||[],help:'Select none for the tenant’s garage (or everywhere).'},
+    {id:'eventNights',label:'Works on event nights',type:'select',options:[['0','No: refused on event nights'],['1','Yes: free time, then regular rates']],value:v.eventNights?'1':'0',help:'Event nights are specials with event dates under Locations → Rates & specials.'},
     ...(isNew?[]:[{id:'active',label:'Status',type:'select',options:[['1','On'],['0','Off']],value:v.active===false?'0':'1'}]),
   ],extra:isNew?'':`<button type="button" class="btn danger" data-dlg="delete">Delete code</button>`,
   onExtra:()=>write(db=>col(db,'validations').doc(v.id).delete(),'Code deleted'),
@@ -1871,7 +1937,7 @@ function validationForm(v){
     const val=+x.value||0;if(x.type!=='full'&&!(val>0))return 'Enter how much the code covers.';if(x.type==='percent'&&val>100)return 'Percent can’t be over 100.';
     const validFrom=x.validFrom?new Date(x.validFrom+'T00:00:00').getTime():null,expiresAt=x.expiresAt?new Date(x.expiresAt+'T23:59:00').getTime():null;
     if(validFrom&&expiresAt&&validFrom>expiresAt)return 'The end date is before the start date.';
-    const data={code,name:x.name.trim(),tenantId:t?t.id:null,department:t?t.name:x.department.trim(),type:x.type,value:x.type==='full'?0:val,maxUses:+x.maxUses||0,validFrom,expiresAt,facilityIds:x.facilityIds};
+    const data={code,name:x.name.trim(),tenantId:t?t.id:null,department:t?t.name:x.department.trim(),type:x.type,value:x.type==='full'?0:val,maxUses:+x.maxUses||0,validFrom,expiresAt,facilityIds:x.facilityIds,eventNights:x.eventNights==='1'};
     if(!isNew){data.active=x.active==='1';return write(db=>col(db,'validations').doc(v.id).update(data),'Code saved')}
     return addDoc('validations',Object.assign(data,{uses:0,active:true,createdAt:now()})).then(ok=>{if(ok)toast('Validation code '+code+' created');return ok})}});
 }
@@ -1900,6 +1966,8 @@ function facilityForm(f){
       {id:'name',label:'Name',value:f.name,required:true},
       {id:'type',label:'Type',type:'select',options:[['garage','Garage'],['lot','Surface lot']],value:f.type||'garage'},
       {id:'payMode',label:'How drivers pay',type:'select',options:[['lpr','LPR cameras at entry and exit (pay on exit, autopay)'],['qr','QR code / text-to-pay signs (pay by plate, no cameras)']],value:f.payMode||(f.type==='lot'?'qr':'lpr')},
+      {id:'onlinePrepay',label:'Paying ahead online',type:'select',options:[['1','Drivers can prepay on the driver page'],['0','No prepay: charged for the whole visit when they leave']],value:f.onlinePrepay===false?'0':'1',help:'Pay-on-exit garages hide from the “Pay to park” list.'},
+      {id:'payButtons',label:'Pay buttons on the driver page',type:'select',options:[['standard','Hours, then All day'],['cap','Hours until the daily max, then one “N+ hrs” button (rest of the day)'],['allday','One “All day” price (flat-rate lots)']],value:f.payButtons||'standard'},
       {id:'lotCode',label:'Lot number on signs',value:f.lotCode||'',help:'Short number drivers scan or text, like 4201. Used by QR lots.'},
       {id:'address',label:'Location note',value:f.address},
       {id:'capacity',label:'Total spaces',type:'number',value:f.capacity,required:true},
@@ -1931,7 +1999,7 @@ function facilityForm(f){
       if(v.payMode==='qr'&&!lotCode)return 'Give the lot a number for its signs.';
       if(lotCode&&S.facilities.some(x=>x.id!==f.id&&String(x.lotCode||'').toUpperCase()===lotCode))return 'Another facility already uses that lot number.';
       const rates=Object.assign({},r,{mode:v.mode,incrementMin:+v.incrementMin||60,incrementPrice:+v.incrementPrice||0,table,dailyMax:+v.dailyMax||0,graceMin:+v.graceMin||0,resetTime:v.resetTime,rolling:v.dayMode==='rolling',specials:r.specials||[]});delete rates.hourly;
-      const data={name:v.name.trim(),type:v.type,payMode:v.payMode,lotCode,address:v.address.trim(),capacity:+v.capacity||0,baseline:+v.baseline||0,timeZone:v.timeZone,reservedSpaces:Math.max(0,Math.round(+v.reservedSpaces||0)),reservationPremium:Math.max(0,+v.reservationPremium||0),reservationGraceMin:Math.max(0,+v.reservationGraceMin||60),cancelHours:Math.max(0,+v.cancelHours||0),valetRate:v.valetRate===''?0:Math.max(0,+v.valetRate||0),active:v.active!=='0',rates};
+      const data={name:v.name.trim(),type:v.type,payMode:v.payMode,onlinePrepay:v.onlinePrepay!=='0',payButtons:['cap','allday'].includes(v.payButtons)?v.payButtons:'standard',lotCode,address:v.address.trim(),capacity:+v.capacity||0,baseline:+v.baseline||0,timeZone:v.timeZone,reservedSpaces:Math.max(0,Math.round(+v.reservedSpaces||0)),reservationPremium:Math.max(0,+v.reservationPremium||0),reservationGraceMin:Math.max(0,+v.reservationGraceMin||60),cancelHours:Math.max(0,+v.cancelHours||0),valetRate:v.valetRate===''?0:Math.max(0,+v.valetRate||0),active:v.active!=='0',rates};
       if(HOSTED)data.terminalDeviceId=String(v.terminalDeviceId||'').trim();
       return f.id?write(db=>col(db,'facilities').doc(f.id).update(data),'Facility saved'):addDoc('facilities',Object.assign(data,{createdAt:now()}),R.uid('f'))}
   });
@@ -1943,18 +2011,18 @@ function ratesForm(f){
     <div class="form-grid"><div class="field"><label for="spn${i}">Name</label><input id="spn${i}" value="${esc(x.name||'')}" placeholder="Early bird"></div><div class="field"><label for="spp${i}">Flat price ($)</label><input id="spp${i}" type="number" step="0.25" value="${esc(x.price??'')}"></div>
     <div class="field"><label for="spf${i}">Enter from</label><input id="spf${i}" type="time" value="${esc(x.enterFrom||'05:00')}"></div><div class="field"><label for="spu${i}">Enter by</label><input id="spu${i}" type="time" value="${esc(x.enterUntil||'09:00')}"></div>
     <div class="field"><label for="spx${i}">Leave by (optional)</label><input id="spx${i}" type="time" value="${esc(x.exitBy||'')}"></div><div class="field"><label for="spa${i}">Leave after (optional)</label><input id="spa${i}" type="time" value="${esc(x.exitAfter||'')}"></div>
-    <div class="field"><label for="spd${i}">Only on dates (optional)</label><input id="spd${i}" value="${esc((x.dates||[]).join(', '))}" placeholder="2026-12-31, 2027-01-01"><div class="help">For events. Leave blank to use the days below.</div></div>
+    <div class="field"><label for="spd${i}">Only on dates (optional)</label><input id="spd${i}" value="${esc((x.dates||[]).join(', '))}" placeholder="2026-12-31, 2027-01-01"><div class="help">For events. Leave blank to use the days below. Add one event special per night when start times differ.</div></div>
     <div class="field"><label for="spm${i}">Minimum stay (minutes)</label><input id="spm${i}" type="number" value="${esc(x.minStayMin||'')}"></div></div>
     <div class="checks" id="spw${i}">${DAYS.map((d,k)=>`<label><input type="checkbox" value="${k}" ${(x.days||[1,2,3,4,5]).map(Number).includes(k)?'checked':''}>${d}</label>`).join('')}</div>
-    <div class="checks"><label><input type="checkbox" id="spn2${i}" ${x.exitNextDay?'checked':''}>Leave-by time is the next day (overnight)</label><label><input type="checkbox" id="sph${i}" ${x.noHolidays===false?'':'checked'}>Not on holidays</label><label><input type="checkbox" id="spo${i}" ${x.active===false?'':'checked'}>Active</label><button type="button" class="btn sm danger" data-sp-rm="${i}">Remove</button></div></div>`;
-  const body=()=>`<p class="muted" style="margin:0 0 10px;font-size:.9rem">Current rates: ${esc(R.rateSummary(Object.assign({},f,{rates:Object.assign({},r,{specials:[]})})).join(' · '))}. A special applies when the whole stay fits its rules; the driver pays whichever is lower.</p>
+    <div class="checks"><label><input type="checkbox" id="spn2${i}" ${x.exitNextDay?'checked':''}>Leave-by time is the next day (overnight)</label><label><input type="checkbox" id="spfl${i}" ${x.flat?'checked':''}>Charge exactly this price, even for a short stay (event entrance rate)</label><label><input type="checkbox" id="sph${i}" ${x.noHolidays===false?'':'checked'}>Not on holidays</label><label><input type="checkbox" id="spo${i}" ${x.active===false?'':'checked'}>Active</label><button type="button" class="btn sm danger" data-sp-rm="${i}">Remove</button></div></div>`;
+  const body=()=>`<p class="muted" style="margin:0 0 10px;font-size:.9rem">Current rates: ${esc(R.rateSummary(Object.assign({},f,{rates:Object.assign({},r,{specials:[]})})).join(' · '))}. A special applies when the whole stay fits its rules; the driver pays whichever is lower, unless the special charges exactly its price (event nights). On event nights only validation codes marked for event nights work, and those stays pay regular rates after their free time.</p>
     <div id="specRows" style="display:grid;gap:10px">${rows.map(row).join('')||'<p class="note">No specials yet.</p>'}</div>
     <div class="row" style="margin-top:10px"><button type="button" class="btn sm" data-sp-add="eb">+ Early bird</button><button type="button" class="btn sm" data-sp-add="ev">+ Evening</button><button type="button" class="btn sm" data-sp-add="wk">+ Weekend</button><button type="button" class="btn sm" data-sp-add="event">+ Event</button></div>
     <div class="field" style="margin-top:12px"><label for="spHol">Holidays (no specials unless an event date), all facilities</label><input id="spHol" value="${esc(hol.join(', '))}" placeholder="2026-11-26, 2026-12-25"></div>`;
   const read=()=>[...dlgForm.querySelectorAll('.spec')].map(el=>{const i=el.dataset.i,g=k=>$('#'+k+i,dlgForm);const dates=g('spd').value.split(',').map(x=>x.trim()).filter(x=>/^\d{4}-\d{2}-\d{2}$/.test(x));
-    return {id:rows[i]&&rows[i].id||R.uid('sp'),name:g('spn').value.trim()||'Special',price:+g('spp').value,enterFrom:g('spf').value||'00:00',enterUntil:g('spu').value||'23:59',exitBy:g('spx').value||'',exitAfter:g('spa').value||'',exitNextDay:g('spn2').checked,dates,minStayMin:+g('spm').value||0,
+    return {id:rows[i]&&rows[i].id||R.uid('sp'),name:g('spn').value.trim()||'Special',price:+g('spp').value,enterFrom:g('spf').value||'00:00',enterUntil:g('spu').value||'23:59',exitBy:g('spx').value||'',exitAfter:g('spa').value||'',exitNextDay:g('spn2').checked,flat:g('spfl').checked,dates,minStayMin:+g('spm').value||0,
       days:[...g('spw').querySelectorAll('input:checked')].map(c=>+c.value),noHolidays:g('sph').checked,active:g('spo').checked}});
-  const PRESET={eb:{name:'Early bird',price:12,enterFrom:'05:00',enterUntil:'09:00',exitBy:'19:00',days:[1,2,3,4,5]},ev:{name:'Evening',price:8,enterFrom:'16:00',enterUntil:'02:00',exitBy:'06:00',exitNextDay:true,days:[0,1,2,3,4,5,6]},wk:{name:'Weekend day',price:10,enterFrom:'00:00',enterUntil:'23:59',days:[0,6]},event:{name:'Event',price:20,enterFrom:'15:00',enterUntil:'22:00',dates:[],days:[]}};
+  const PRESET={eb:{name:'Early bird',price:12,enterFrom:'05:00',enterUntil:'09:00',exitBy:'19:00',days:[1,2,3,4,5]},ev:{name:'Evening',price:8,enterFrom:'16:00',enterUntil:'02:00',exitBy:'06:00',exitNextDay:true,days:[0,1,2,3,4,5,6]},wk:{name:'Weekend day',price:10,enterFrom:'00:00',enterUntil:'23:59',days:[0,6]},event:{name:'Event',price:25,enterFrom:'17:00',enterUntil:'23:59',exitBy:r.resetTime||'03:00',exitNextDay:true,flat:true,dates:[],days:[]}};
   const redraw=()=>{rows=read();$('#specRows',dlgForm).innerHTML=rows.map(row).join('')||'<p class="note">No specials yet.</p>'};
   openForm({title:'Rates & specials: '+f.name,submit:'Save specials',body:body(),onSubmit:async()=>{
     const sp=read();const bad=sp.find(x=>!(x.price>=0)||isNaN(x.price));if(bad)return `Give “${bad.name}” a price.`;
@@ -1997,7 +2065,7 @@ function vPermits(){
     <div class="kpi ${cnt('pastdue')?'alert':''}"><small>Past due or suspended</small><b>${cnt('pastdue')}</b><span>${S.permits.filter(p=>p.status==='suspended').length} suspended</span></div><div class="kpi"><small>Waitlist</small><b>${cnt('waitlist')}</b><span>Approve when a spot opens</span></div></div>
   <section class="panel"><div class="panel-h"><h2>Plans</h2><span class="muted" style="font-size:.84rem">Sold includes waitlisted-then-approved and suspended parkers</span></div>
   <div class="panel-b"><div class="facs">${S.permitTypes.length?[...S.permitTypes].sort((a,b)=>a.name.localeCompare(b.name)).map(t=>{const sold=R.soldOf(t),q=+t.quota||0,p=q?sold/q:0;const fs=(t.facilities||[]).map(facById).filter(Boolean);
-    return `<button class="fac" data-act="editType" data-id="${t.id}"><div class="fac-top"><div><h3>${esc(t.name)}</h3><span class="tag">${t.kind==='reserved'?'Reserved space':'Unreserved'}</span> ${t.active===false?'<span class="tag">Not for sale</span>':''}</div><div class="pct" style="font-size:1.2rem">${money0(t.price)}<span class="muted" style="font-size:.8rem">/mo</span></div></div>
+    return `<button class="fac" data-act="editType" data-id="${t.id}"><div class="fac-top"><div><h3>${esc(t.name)}</h3><span class="tag">${t.kind==='reserved'?'Reserved space':'Unreserved'}</span> ${t.active===false?'<span class="tag">Not for sale</span>':''}</div><div class="pct" style="font-size:1.2rem">${moneyP(t.price)}<span class="muted" style="font-size:.8rem">/mo</span></div></div>
     <div class="bar ${p>=1?'bad':p>=.85?'warn':''}"><i style="width:${Math.min(100,p*100)}%"></i></div>
     <div class="fac-meta num"><span>${sold} / ${q||'∞'} sold</span><span>Up to ${t.maxVehicles||3} vehicles</span></div>
     <div class="muted" style="font-size:.8rem">${fs.length?fs.map(f=>esc(f.name)).join(', '):'All facilities'}</div></button>`}).join(''):'<div class="muted">No monthly plans yet.</div>'}</div></div></section>
@@ -2072,7 +2140,7 @@ function companyForm(c){
     {id:'phone',label:'Contact phone',type:'tel',value:c.phone},
     {id:'facilityIds',label:'Parks at',type:'checks',options:S.facilities.map(f=>[f.id,f.name]),value:c.facilityIds||[],help:'Only plans at these locations can be used. Select none for any location.'},
     {id:'maxParkers',label:'Parker limit',type:'number',value:c.maxParkers||'',help:'The most monthly parkers this account can have at once. Blank for no limit. Waitlisted people don’t count.'},
-    {id:'planIds',label:'Plans they can use',type:'checks',options:S.permitTypes.map(t=>[t.id,`${t.name} · ${money0(t.price)}/mo`]),value:c.planIds||[],help:'Select none to allow every plan at their locations.'},
+    {id:'planIds',label:'Plans they can use',type:'checks',options:S.permitTypes.map(t=>[t.id,`${t.name} · ${moneyP(t.price)}/mo`]),value:c.planIds||[],help:'Select none to allow every plan at their locations.'},
     {id:'billing',label:'How the account pays',type:'select',options:[['invoice','Square invoice each month (card or bank transfer)'],['card','Card on file, charged on the 1st']],value:c.billing||'invoice'},
     {id:'notes',label:'Notes (only staff see these)',value:c.notes||''},
   ],extra:isNew?'':`<button type="button" class="btn danger" data-dlg="delete">Delete account</button>`,
@@ -2111,7 +2179,7 @@ function permitForm(p){
       {id:'holder',label:'Name',value:p.holder,required:true},{id:'email',label:'Email',type:'email',value:p.email},
       {id:'phone',label:'Mobile',type:'tel',value:p.phone},
       {id:'companyId',label:'Account',type:'select',options:[['','None (individual)'],...S.companies.map(c=>[c.id,c.name])],value:p.companyId||''},
-      {id:'permitTypeId',label:'Plan',type:'select',options:S.permitTypes.map(t=>[t.id,`${t.name} · ${money0(t.price)}/mo`]),value:p.permitTypeId},
+      {id:'permitTypeId',label:'Plan',type:'select',options:S.permitTypes.map(t=>[t.id,`${t.name} · ${moneyP(t.price)}/mo`]),value:p.permitTypeId},
       {id:'plates',label:'License plates',value:(p.plates||[]).join(', '),required:true,help:'Separated by commas.'},
       ...(isNew?[{id:'paid',label:'This month',type:'select',options:[['bill','Add the rest of this month to the next bill (companies)'],['paid','Paid at the office']],value:p._bill?'bill':'paid'}]:[]),
     ],
@@ -2160,8 +2228,9 @@ function vLpr(){
     <div class="row"><button class="btn pri" ${cams.length?'':'disabled'}>Process read</button>${UI.lprResult?`<span class="pill dot ${UI.lprResult.level==='info'?'info':UI.lprResult.level}">${esc(UI.lprResult.text)}</span>`:''}</div>
   </form></section>
   <section class="panel"><div class="panel-h"><h2>Import reads</h2></div><div class="panel-b" style="display:grid;gap:10px">
-    <p class="muted" style="margin:0;font-size:.9rem">CSV with columns <span class="mono">plate, camera, time</span>. Camera is the lane camera’s name. Time is optional. Reads are processed in time order, up to 500 at a time.</p>
-    <input type="file" id="csvFile" accept=".csv,text/csv"></div></section></div>
+    <p class="muted" style="margin:0;font-size:.9rem">Drop a camera export anywhere on this page: an Axis License Plate Verifier CSV, or any CSV with a plate, a camera and a date and time. You’ll see a preview and match the columns before anything is saved.</p>
+    <label class="dropzone" id="csvDrop" for="csvFile"><b>Drag a CSV file here</b><span class="muted">or click to choose one</span><input type="file" id="csvFile" accept=".csv,.txt,.tsv,text/csv,text/plain,text/tab-separated-values" class="sr-only"></label></div></section></div>
+  ${UI.imp?importPreview():''}
   <section class="panel"><div class="panel-h"><h2>Read log</h2><span class="muted" style="font-size:.84rem">Last ${S.feed.length} reads</span></div>${feedTable(S.feed)}</section>`;
 }
 function cameraForm(c){
@@ -2179,20 +2248,112 @@ function cameraForm(c){
     data.token=Array.from(crypto.getRandomValues(new Uint8Array(12)),b=>b.toString(16).padStart(2,'0')).join('');data.createdAt=now();
     return addDoc('cameras',data,R.uid('c')).then(ok=>{if(ok)toast('Camera added');return ok})}});
 }
-async function importCsv(file){
-  const text=await file.text();const lines=text.split(/\r?\n/).map(l=>l.trim()).filter(Boolean);
-  if(!lines.length){toast('That file is empty.',true);return}
-  let rows=lines.map(l=>l.split(',').map(x=>x.trim().replace(/^"|"$/g,'')));
-  if(/plate/i.test(rows[0][0]))rows=rows.slice(1);
-  const parsed=[];let bad=0;
-  rows.forEach(r=>{const [p,cam,t]=r;const c=S.cameras.find(x=>x.id===cam||x.name.toLowerCase()===String(cam||'').toLowerCase());const at=t?Date.parse(t):now();
-    if(!c||isNaN(at)){bad++;return}parsed.push({plate:p,cameraId:c.id,at})});
-  if(parsed.length>500){toast('Import up to 500 reads at a time.',true);return}
-  parsed.sort((a,b)=>a.at-b.at);toast(`Processing ${parsed.length} reads…`);
-  if(HOSTED){const r=await HOSTED.lprImport(parsed);toast(`Imported ${r.count} reads${bad?`, skipped ${bad} rows`:''}`);return}
-  for(const r of parsed)await lprRead(r);
-  toast(`Imported ${parsed.length} reads${bad?`, skipped ${bad} rows with an unknown camera or time`:''}`);
+/* ---------- camera export import (Axis License Plate Verifier and other CSVs) ----------
+   Reads the file in the browser, guesses which column holds the plate, the camera and the time, and shows a preview
+   where staff fix any guess and match each camera name in the file to a ParkOps lane. Nothing is saved until Import.
+   Reads go to the server 500 at a time, oldest first, so entries and exits pair up into visits that occupancy,
+   unpaid-exit tracking and enforcement see. Times without a time zone are read as this computer's local time. */
+function parseDelimited(text){
+  text=String(text||'').replace(/^﻿/,'');
+  const first=text.split(/\r?\n/,1)[0]||'',cnt=ch=>first.split(ch).length-1;
+  const d=[['\t',cnt('\t')],[';',cnt(';')],[',',cnt(',')]].sort((a,b)=>b[1]-a[1])[0][0];
+  const rows=[];let row=[],f='',q=false;
+  for(let i=0;i<text.length;i++){const c=text[i];
+    if(q){if(c==='"'){if(text[i+1]==='"'){f+='"';i++}else q=false}else f+=c;continue}
+    if(c==='"'&&f==='')q=true;else if(c===d){row.push(f);f=''}
+    else if(c==='\n'||c==='\r'){if(c==='\r'&&text[i+1]==='\n')i++;row.push(f);f='';if(row.some(x=>x.trim()!==''))rows.push(row);row=[]}
+    else f+=c}
+  row.push(f);if(row.some(x=>x.trim()!==''))rows.push(row);
+  return rows.map(r=>r.map(x=>x.trim()));
 }
+/* "20261005 140322123" (Axis), "2026-10-05 14:03:22", "10/5/2026 2:03 PM", or seconds/milliseconds since 1970. */
+function parseWhen(dateStr,timeStr){
+  const raw=[dateStr,timeStr].filter(x=>x!=null&&String(x).trim()!=='').join(' ').trim();if(!raw)return NaN;
+  if(/^\d{10}$/.test(raw))return +raw*1000;if(/^\d{13}$/.test(raw))return +raw;
+  let m=raw.match(/^(\d{4})(\d{2})(\d{2})[ T]?(\d{2})(\d{2})(\d{2})/);if(m)return new Date(+m[1],+m[2]-1,+m[3],+m[4],+m[5],+m[6]).getTime();
+  m=raw.match(/^(\d{4})-(\d{1,2})-(\d{1,2})[ T](\d{1,2}):(\d{2})(?::(\d{2}))?(?:[.,]\d+)?\s*(Z|[+-]\d{2}:?\d{2})?$/i);
+  if(m){if(m[7])return Date.parse(raw.replace(' ','T'));return new Date(+m[1],+m[2]-1,+m[3],+m[4],+m[5],+(m[6]||0)).getTime()}
+  const t=Date.parse(raw);return isNaN(t)?NaN:t;
+}
+function guessImportColumns(cols){
+  const find=(re,not)=>cols.findIndex(c=>re.test(c)&&!(not&&not.test(c)));
+  const plate=[/^plate$/i,/plateunicode|plateutf8|platetext/i,/licen[cs]e.?plate|plate.?(number|no)?$/i,/plate/i].map(r=>find(r,/confidence|country|region|image|picture|state$/i)).find(i=>i>=0);
+  const camera=[/^camera$/i,/camera.?name|camera/i,/source|device|lane|channel|sensor|location|serial/i].map(r=>find(r,/plate|confidence/i)).find(i=>i>=0);
+  const dt=[/date.?time|timestamp|time.?stamp|^datetime$/i,/^(captured|read|event).?(at|time)$/i].map(r=>find(r)).find(i=>i>=0);
+  const date=dt!=null?dt:find(/date|day/i),time=dt!=null?-1:find(/^time$|time/i);
+  return {plate:plate??-1,camera:camera??-1,date:date??-1,time:time==null?-1:time};
+}
+async function importCsv(file){
+  if(!file)return;
+  if(file.size>15e6){toast('That file is over 15 MB. Export a shorter date range and try again.',true);return}
+  const rows=parseDelimited(await file.text());
+  if(!rows.length){toast('That file is empty.',true);return}
+  const header=rows[0].some(c=>/plate|camera|time|date|lane|source|device/i.test(c))&&!rows[0].some(c=>/^\d{4}-\d{2}-\d{2}/.test(c));
+  const width=Math.max(...rows.map(r=>r.length));
+  const cols=header?rows[0].map((c,i)=>c||'Column '+(i+1)):Array.from({length:width},(_,i)=>'Column '+(i+1));
+  const data=header?rows.slice(1):rows;
+  const map=header?guessImportColumns(cols):{plate:0,camera:width>1?1:-1,date:width>2?2:-1,time:-1};
+  UI.imp={name:file.name,cols,data,map,camMap:{},oneCam:''};
+  importAutoMatch();render();
+  setTimeout(()=>{const el=$('#impPanel');if(el)el.scrollIntoView({behavior:'smooth',block:'start'})},50);
+}
+/* Match each camera name in the file to a lane camera with the same name (or one name containing the other). */
+function importAutoMatch(){
+  const im=UI.imp;if(!im||im.map.camera<0)return;
+  const vals=[...new Set(im.data.map(r=>r[im.map.camera]||''))].filter(Boolean);
+  vals.forEach(v=>{if(im.camMap[v])return;const lv=v.toLowerCase();
+    const c=S.cameras.find(x=>x.name.toLowerCase()===lv)||S.cameras.find(x=>lv&&(x.name.toLowerCase().includes(lv)||lv.includes(x.name.toLowerCase())))||S.cameras.find(x=>x.model&&x.model.toLowerCase()===lv);
+    if(c)im.camMap[v]=c.id});
+}
+function importRows(){
+  const im=UI.imp,m=im.map,out=[];let noPlate=0,noTime=0,noCam=0;
+  im.data.forEach(r=>{const plate=normPlate(m.plate>=0?r[m.plate]:'');if(!plate){noPlate++;return}
+    const camId=m.camera>=0?im.camMap[r[m.camera]||'']:im.oneCam;if(!camId||!byId('cameras',camId)){noCam++;return}
+    const at=m.date>=0?parseWhen(r[m.date],m.time>=0?r[m.time]:''):NaN;if(isNaN(at)){noTime++;return}
+    out.push({plate,cameraId:camId,at})});
+  out.sort((a,b)=>a.at-b.at);
+  return {reads:out,noPlate,noTime,noCam};
+}
+function importPreview(){
+  const im=UI.imp,m=im.map,cams=S.cameras;
+  const colSel=(id,val,none)=>`<select id="${id}" data-fresh="1">${none?`<option value="-1" ${val<0?'selected':''}>${esc(none)}</option>`:''}${im.cols.map((c,i)=>`<option value="${i}" ${val===i?'selected':''}>${esc(c)}</option>`).join('')}</select>`;
+  const camOpts=sel=>`<option value="">Skip these rows</option>${cams.map(c=>`<option value="${c.id}" ${sel===c.id?'selected':''}>${esc((facById(c.facilityId)||{}).name||'')} · ${esc(c.name)} (${c.direction==='in'?'entry':'exit'})</option>`).join('')}`;
+  const vals=m.camera>=0?[...new Set(im.data.map(r=>r[m.camera]||''))].filter(Boolean).slice(0,60):[];
+  const res=importRows(),sample=im.data.slice(0,5),tz=Intl.DateTimeFormat().resolvedOptions().timeZone;if(im.skip)res.reads=res.reads.slice(im.skip);
+  const first=res.reads[0],last=res.reads[res.reads.length-1];
+  return `<section class="panel" id="impPanel"><div class="panel-h"><h2>Import ${esc(im.name)}</h2><span class="muted" style="font-size:.84rem">${im.data.length.toLocaleString()} rows · nothing is saved until you import</span></div>
+  <div class="panel-b" style="display:grid;gap:14px">
+    ${cams.length?'':'<div class="callout warn"><b>Add your lane cameras first.</b> Each read has to belong to an entry or exit lane. Add them above, then match them here.</div>'}
+    <div class="form-grid">
+      <div class="field"><label for="impPlate">Plate column</label>${colSel('impPlate',m.plate)}</div>
+      <div class="field"><label for="impCam">Camera column</label>${colSel('impCam',m.camera,'No camera column: one lane for the whole file')}</div>
+      <div class="field"><label for="impDate">Date and time column</label>${colSel('impDate',m.date)}</div>
+      <div class="field"><label for="impTime">Separate time column (optional)</label>${colSel('impTime',m.time,'None: the date column has the time')}</div>
+    </div>
+    ${m.camera<0?`<div class="field"><label for="impOne">Every row is from this lane</label><select id="impOne" data-fresh="1">${camOpts(im.oneCam)}</select></div>`:
+      vals.length?`<div><h3 style="margin:0 0 8px;font-size:1rem">Match each camera in the file to a lane</h3><div class="tbl-wrap"><table><thead><tr><th>In the file</th><th class="r">Rows</th><th>ParkOps lane</th></tr></thead><tbody>${vals.map((v,k)=>`<tr><td class="mono">${esc(v)}</td><td class="r num">${im.data.filter(r=>r[m.camera]===v).length}</td><td><select data-impcam="${k}" data-fresh="1">${camOpts(im.camMap[v])}</select></td></tr>`).join('')}</tbody></table></div></div>`:''}
+    <div class="tbl-wrap"><table><thead><tr>${im.cols.map((c,i)=>`<th class="${[m.plate,m.camera,m.date,m.time].includes(i)?'':'muted'}">${esc(c)}</th>`).join('')}<th>Reads as</th></tr></thead><tbody>${sample.map(r=>{const at=m.date>=0?parseWhen(r[m.date],m.time>=0?r[m.time]:''):NaN;
+      return `<tr>${im.cols.map((c,i)=>`<td class="${[m.plate,m.camera,m.date,m.time].includes(i)?'':'muted'}">${esc(r[i]||'')}</td>`).join('')}<td>${normPlate(r[m.plate]||'')?plateChip(normPlate(r[m.plate]||'')):'<span class="pill warn">No plate</span>'} ${isNaN(at)?'<span class="pill warn">Time not understood</span>':esc(new Date(at).toLocaleString())}</td></tr>`}).join('')}</tbody></table></div>
+    <div class="summary-row"><div><small>Ready to import</small><b>${res.reads.length.toLocaleString()}</b></div><div class="${res.noCam?'over':''}"><small>No lane matched</small><b>${res.noCam}</b></div><div class="${res.noTime?'over':''}"><small>Time not understood</small><b>${res.noTime}</b></div><div><small>No plate</small><b>${res.noPlate}</b></div></div>
+    <p class="note" style="margin:0">${first?`Reads run from ${esc(new Date(first.at).toLocaleString())} to ${esc(new Date(last.at).toLocaleString())}. `:''}Times without a time zone are read as ${esc(tz)} time. Reads are processed oldest first, so each entry pairs with its exit. Reads more than 2 hours old don’t charge saved cards or send alerts.</p>
+    <div class="row"><button class="btn pri" data-act="impRun" ${res.reads.length?'':'disabled'}>Import ${res.reads.length.toLocaleString()} read${res.reads.length===1?'':'s'}</button><button class="btn" data-act="impCancel">Cancel</button></div>
+  </div></section>`;
+}
+async function runImport(){
+  const im=UI.imp;if(!im)return;const reads=importRows().reads.slice(im.skip||0);if(!reads.length)return;
+  const btn=$('[data-act=impRun]');if(btn){btn.disabled=true;btn.textContent='Importing…'}
+  let done=0,saved=0;
+  try{
+    for(let i=0;i<reads.length;i+=500){const chunk=reads.slice(i,i+500);
+      if(HOSTED){const r=await HOSTED.lprImport(chunk);saved+=r.count||0}else{for(const x of chunk){await lprRead(x);saved++}}
+      done+=chunk.length;im.skip=(im.skip||0)+chunk.length;if(btn)btn.textContent=`Importing… ${done.toLocaleString()} of ${reads.length.toLocaleString()}`}
+    toast(`Imported ${saved.toLocaleString()} read${saved===1?'':'s'} from ${im.name}${saved<reads.length?` (${reads.length-saved} couldn’t be processed; see the read log)`:''}`);UI.imp=null;render();
+  }catch(e){toast('Import stopped after '+done.toLocaleString()+' reads: '+((e&&e.message)||'try again')+'. Press Import again to send the rest.',true);render()}
+}
+/* Drop a file anywhere on the Cameras page (or on the drop box) to import it. */
+document.addEventListener('dragover',e=>{if(UI.tab!=='lpr'||!$('#csvDrop'))return;e.preventDefault();$('#csvDrop').classList.add('over')});
+document.addEventListener('dragleave',e=>{const z=$('#csvDrop');if(z&&(!e.relatedTarget||!document.documentElement.contains(e.relatedTarget)))z.classList.remove('over')});
+document.addEventListener('drop',e=>{const z=$('#csvDrop');if(UI.tab!=='lpr'||!z)return;e.preventDefault();z.classList.remove('over');const f=e.dataTransfer&&e.dataTransfer.files&&e.dataTransfer.files[0];if(f)importCsv(f)});
 
 /* ============ settings ============ */
 function vSettings(){
@@ -2217,6 +2378,8 @@ function vSettings(){
     <div class="field"><label for="sMRemSms">Send reminders by</label><select id="sMRemSms"><option value="1" ${S.config&&S.config.monthlyReminderSms===false?'':'selected'}>Email, and text when they gave a mobile</option><option value="0" ${S.config&&S.config.monthlyReminderSms===false?'selected':''}>Email only</option></select></div>`:''}
     <div class="field"><label for="sInvDue">Company invoices due (days after sending)</label><input id="sInvDue" type="number" value="${esc((S.config&&S.config.invoiceDueDays)??5)}"></div>
     <div class="field"><label for="sStale">Flag open visits older than (hours)</label><input id="sStale" type="number" value="${esc((S.config&&S.config.openVisitFlagHours)??24)}"></div>
+    <div class="field"><label for="sRepN">Flag a car that uses the same validation code (times)</label><input id="sRepN" type="number" min="2" value="${esc((S.config&&S.config.repeatValidationCount)??3)}"></div>
+    <div class="field"><label for="sRepD">…within (days)</label><input id="sRepD" type="number" min="1" value="${esc((S.config&&S.config.repeatValidationDays)??7)}"></div>
     <div class="field"><label for="sBrand">Brand color</label><input id="sBrand" type="color" value="${esc((S.config&&S.config.brandColor)||'#1a56cc')}"></div>
     <div class="field"><label for="sStripe">Highlight color</label><input id="sStripe" type="color" value="${esc((S.config&&S.config.brandStripe)||'#e8a800')}"></div>
     <div class="field"><label for="sPrint">Notice printer paper</label><select id="sPrint">${[[2,'2 inch (ZQ110, ZQ210)'],[3,'3 inch (ZQ320, ZQ520, ZQ620)'],[4,'4 inch (ZQ630, ZQ521)']].map(([k,l])=>`<option value="${k}" ${+((S.config&&S.config.printerWidth)||3)===k?'selected':''}>${l}</option>`).join('')}</select></div></div>
@@ -2304,7 +2467,7 @@ function vPortal(){
     <div class="row" style="justify-content:space-between;align-items:center"><span class="note">Pilot mode: a demo card ending 4242 is attached.</span><button class="btn pri">Turn on autopay</button></div></form></section>
   <section class="panel" style="grid-column:1/-1"><div class="panel-h"><h2>Monthly parking</h2></div><form class="panel-b" data-form="apply" style="display:grid;gap:12px">
     ${types.length?`<div class="form-grid"><div class="field"><label for="aName">Full name</label><input id="aName"></div><div class="field"><label for="aEmail">Email</label><input id="aEmail" type="email"></div>
-    <div class="field"><label for="aType">Plan</label><select id="aType">${types.map(t=>`<option value="${t.id}">${esc(t.name)} · ${money0(t.price)}/month</option>`).join('')}</select><div class="help" id="aTypeInfo"></div></div>
+    <div class="field"><label for="aType">Plan</label><select id="aType">${types.map(t=>`<option value="${t.id}">${esc(t.name)} · ${moneyP(t.price)}/month</option>`).join('')}</select><div class="help" id="aTypeInfo"></div></div>
     <div class="field"><label for="aPlates">License plates</label><input id="aPlates" placeholder="Separated by commas" style="text-transform:uppercase"></div></div>
     <div><button class="btn pri">Start monthly parking</button></div>`:'<p class="muted">Monthly parking isn’t open for sign-up right now.</p>'}</form></section>
   </div>
@@ -2374,6 +2537,8 @@ let toastT;function toast(msg,err){const t=$('#toast');t.textContent=msg;t.class
 /* ============ actions ============ */
 const VIEWS={overview:vOverview,activity:vActivity,tenants:vTenants,facilities:vFacilities,permits:vPermits,citations:vCitations,lpr:vLpr,settings:vSettings,reservations:()=>window.vReservations?window.vReservations():'',payments:()=>window.vPayments?window.vPayments():'',history:()=>window.vHistory?window.vHistory():'',daily:()=>window.vDaily?window.vDaily():'',selfparking:()=>window.vSelfParking?window.vSelfParking():'',review:()=>window.vReview?window.vReview():'',valet:()=>window.vValet?window.vValet():'',reports:()=>window.vReports?window.vReports():''};
 const ACT={
+  impRun(){runImport()},
+  impCancel(){UI.imp=null;render()},
   goTab(b){UI.tab=b.dataset.tab;store.set('tab',UI.tab);const f=b.dataset.filter;if(f){if(UI.tab==='permits')UI.permitStatus=f==='pending'?'all':f;if(UI.tab==='citations')UI.citeStatus=f;if(UI.tab==='activity'){UI.auditFilter=f;UI.auditRange='week'}if(UI.tab==='selfparking'){UI.spView='tickets';UI.tkStatus=f;UI.tkRange='month'}}
     if(b.dataset.tenant){UI.tenant=b.dataset.tenant;UI.tenantDay=0}if(b.dataset.fac){UI.actFac=b.dataset.fac;store.set('actFac',UI.actFac)}render();window.scrollTo(0,0)},
   permitStatus(b){UI.permitStatus=b.dataset.v;render()},enfZone(b){UI.enfZone=b.dataset.v;render()},citeStatus(b){UI.citeStatus=b.dataset.v;render()},auditFilter(b){UI.auditFilter=b.dataset.v;render()},
@@ -2467,7 +2632,7 @@ const FORMS={
     let photoIds=[];if(HOSTED&&window.citePhotoIds)photoIds=window.citePhotoIds(UI.check.plate,UI.check.facId);
     const ok=await issueCitation({plate:UI.check.plate,facId:UI.check.facId,code:$('#citeViol').value,officer,notes:$('#citeNotes').value.trim(),plateState:($('#citeState')||{}).value,photoIds});
     if(ok){$('#citeNotes').value='';if(window.clearCitePhotos)window.clearCitePhotos();render()}},
-  async settings(){const g=+$('#sGrace').value||48;await write(db=>db.doc('settings/config').set(Object.assign({},S.config||{},{campusName:$('#sCampus').value.trim(),timeZone:$('#sTz').value,unpaidGraceHours:g,lateFee:Math.max(0,+$('#sLate').value||0),autoCiteHours:Math.max(0,+$('#sCiteH').value||0),hotListAmount:Math.max(1,+$('#sHotAmt').value||100),hotListCount:Math.max(1,+$('#sHotN').value||3),alertEmail:$('#sAlert').value.trim(),printerWidth:+$('#sPrint').value||3,taxRate:Math.max(0,Math.min(20,+$('#sTax').value||0)),taxIncluded:$('#sTaxInc').value==='1',enforcementGraceMin:Math.max(0,+$('#sEnfG').value||0),monthlyLateFee:Math.max(0,+$('#sMLate').value||0),monthlyGraceDays:Math.max(1,+$('#sMGrace').value||5),invoiceDueDays:Math.max(1,+$('#sInvDue').value||5),...($('#sMRem')?{monthlyReminderDays:Math.max(0,Math.min(25,+$('#sMRem').value||0)),monthlyReminderSms:$('#sMRemSms').value==='1'}:{}),openVisitFlagHours:Math.max(1,+$('#sStale').value||24),brandColor:$('#sBrand').value,brandStripe:$('#sStripe').value})),'Settings saved')},
+  async settings(){const g=+$('#sGrace').value||48;await write(db=>db.doc('settings/config').set(Object.assign({},S.config||{},{repeatValidationCount:Math.max(2,Math.round(+(($('#sRepN')||{}).value)||3)),repeatValidationDays:Math.max(1,Math.round(+(($('#sRepD')||{}).value)||7)),campusName:$('#sCampus').value.trim(),timeZone:$('#sTz').value,unpaidGraceHours:g,lateFee:Math.max(0,+$('#sLate').value||0),autoCiteHours:Math.max(0,+$('#sCiteH').value||0),hotListAmount:Math.max(1,+$('#sHotAmt').value||100),hotListCount:Math.max(1,+$('#sHotN').value||3),alertEmail:$('#sAlert').value.trim(),printerWidth:+$('#sPrint').value||3,taxRate:Math.max(0,Math.min(20,+$('#sTax').value||0)),taxIncluded:$('#sTaxInc').value==='1',enforcementGraceMin:Math.max(0,+$('#sEnfG').value||0),monthlyLateFee:Math.max(0,+$('#sMLate').value||0),monthlyGraceDays:Math.max(1,+$('#sMGrace').value||5),invoiceDueDays:Math.max(1,+$('#sInvDue').value||5),...($('#sMRem')?{monthlyReminderDays:Math.max(0,Math.min(25,+$('#sMRem').value||0)),monthlyReminderSms:$('#sMRemSms').value==='1'}:{}),openVisitFlagHours:Math.max(1,+$('#sStale').value||24),brandColor:$('#sBrand').value,brandStripe:$('#sStripe').value})),'Settings saved')},
   async violations(){const v=[];violations().forEach((_,i)=>{const code=normPlate($('#vc'+i).value);if(!code)return;v.push({code,name:$('#vn'+i).value.trim()||code,fine:+$('#vf'+i).value||0})});
     if(new Set(v.map(x=>x.code)).size!==v.length){toast('Each violation needs a unique code.',true);return}
     await write(db=>db.doc('settings/config').set(Object.assign({},S.config||{},{violations:v})),'Violation schedule saved')},
@@ -2495,6 +2660,9 @@ document.addEventListener('change',async e=>{const id=e.target.id;
   if(id==='auditRange'){UI.auditRange=e.target.value;render()}
   if(id==='pHours'||id==='pFac')updateQuote();if(id==='aType')updateTypeInfo();
   if(id==='csvFile'&&e.target.files[0]){await importCsv(e.target.files[0]);e.target.value=''}
+  if(UI.imp&&['impPlate','impCam','impDate','impTime'].includes(id)){const k={impPlate:'plate',impCam:'camera',impDate:'date',impTime:'time'}[id];UI.imp.map[k]=+e.target.value;if(k==='camera')importAutoMatch();render()}
+  if(UI.imp&&id==='impOne'){UI.imp.oneCam=e.target.value;render()}
+  if(UI.imp&&e.target.dataset&&e.target.dataset.impcam!=null){const m=UI.imp.map,vals=[...new Set(UI.imp.data.map(r=>r[m.camera]||''))].filter(Boolean);const v=vals[+e.target.dataset.impcam];if(v!=null){UI.imp.camMap[v]=e.target.value;render()}}
   if(id==='citePhotos'&&e.target.files.length&&window.addCitePhotos){await window.addCitePhotos(e.target.files);e.target.value=''}});
 setInterval(()=>{if(!dlg.open&&isLoaded())schedule()},30000);
 render();boot();
@@ -2559,9 +2727,11 @@ render();boot();
   const dlgErrorOrOk = r => r && r.error ? r.error : true;
   window.payTicketDialog = function (id, opts) {
     const s = byId('sessions', id); if (!s) return; opts = opts || {};
-    const b = R.ticketBill(s), due = b.due; if (!(due > 0)) { toast('Nothing is owed on this ticket.'); return; }
+    // Event nights: opts.entry collects the flat event rate at the entrance and leaves the ticket open.
+    if (opts.entry) opts.close = false;
+    const b = R.ticketBill(s), due = opts.entry ? R.entryDue(s) : b.due; if (!(due > 0)) { toast('Nothing is owed on this ticket.'); return; }
     const methods = [['cash', 'Cash'], ['card', 'Card (external terminal or reader)'], ['check', 'Check']].concat(can('tickets.adjust') ? [['comp', 'Complimentary (no money, reason required)']] : []);
-    openForm({ title: `Collect ${money(due)} · ${s.plate}`, submit: opts.close && !s.endAt ? 'Collect and close ticket' : 'Record payment', fields: [
+    openForm({ title: opts.entry ? `Event rate ${money(due)} · ${s.plate}` : `Collect ${money(due)} · ${s.plate}`, submit: opts.close && !s.endAt ? 'Collect and close ticket' : opts.entry ? 'Record payment · car stays' : 'Record payment', fields: [
       { id: 'method', label: 'Paid with', type: 'select', options: methods, value: 'cash' },
       { id: 'amount', label: 'Amount ($) · leave as is for full payment', type: 'number', step: '0.01', value: due.toFixed(2), required: true, help: `${money(due)} due${b.tax.tax ? ` (includes ${money(b.tax.tax)} tax)` : ''}. A partial payment leaves the rest owed on the ticket${opts.close && !s.endAt && !can('tickets.adjust') ? ', and only a manager can close a ticket with money still owed, so collect the full amount' : ''}.` },
       { id: 'tendered', label: 'Cash tendered ($)', type: 'number', step: '0.01', value: '', help: 'Type what the driver hands you; change due appears below. Leave blank for exact change.' },
@@ -2656,14 +2826,16 @@ render();boot();
     const done = UI.deskDone && UI.deskDone.id === s.id ? UI.deskDone : null;
     const pill = s.kind === 'permit' ? '<span class="pill ok">Monthly parker</span>' : s.vipFree ? '<span class="pill ok">VIP · no charge</span>' : s.validation ? `<span class="pill info">Validated · ${esc(s.validation.code)}</span>` : R.needsReview(s) ? '<span class="pill warn">Held for review</span>' : '';
     const hot = R.isHot(normPlate(s.plate));
-    return `<section class="panel"><div class="panel-h"><h2>${esc(tk(s))}</h2>${pill}${hot ? `<span class="pill bad">Hot list · ${money(hot.total)} owed</span>` : ''}<span class="muted" style="font-size:.84rem">${esc(f ? f.name : '')}</span></div>
+    const entry = !s.endAt ? R.entryDue(s) : 0, ev = entry > 0 ? R.eventAt(R.facFor(s), s.startAt) : null;
+    return `<section class="panel"><div class="panel-h"><h2>${esc(tk(s))}</h2>${pill}${ev ? `<span class="pill info">${esc(ev.name || 'Event')} night</span>` : ''}${hot ? `<span class="pill bad">Hot list · ${money(hot.total)} owed</span>` : ''}<span class="muted" style="font-size:.84rem">${esc(f ? f.name : '')}</span></div>
     <div class="panel-b" style="display:grid;gap:14px">
       <div class="row" style="align-items:center;gap:12px">${plateChip(s.plate)}${typeTag(s)}${s.valet ? `<span class="tag">Key ${esc(s.valet.tag || '—')} · ${esc(s.valet.space || '')}</span>` : ''}</div>
-      <div class="due ${due > 0 ? '' : 'zero'}"><div><small class="muted" style="text-transform:uppercase;letter-spacing:.07em;font-weight:600">${due > 0 ? 'Amount due' : 'Nothing due'}</small><b>${money(due)}</b>${b.tax.tax && due > 0 ? `<div class="note">Includes ${money(R.taxOf(due).tax)} sales tax</div>` : ''}</div>
+      <div class="due ${due > 0 || entry > 0 ? '' : 'zero'}"><div><small class="muted" style="text-transform:uppercase;letter-spacing:.07em;font-weight:600">${entry > 0 && entry >= due ? 'Event rate due now' : due > 0 ? 'Amount due' : 'Nothing due'}</small><b>${money(entry > 0 && entry >= due ? entry : due)}</b>${b.tax.tax && (due > 0 || entry > 0) ? `<div class="note">Includes ${money(R.taxOf(entry > 0 && entry >= due ? entry : due).tax)} sales tax</div>` : ''}</div>
         <div class="facts" style="flex:1"><div><small>Arrived</small><b>${fmtTime(s.startAt, tz)}</b></div><div><small>Time parked</small><b>${dur(now() - s.startAt)}</b></div><div><small>Rate</small><b>${esc(R.rateSummary(R.facFor(s))[0] || '')}</b>${(() => { const rr = (R.facFor(s) || {}).rates || {}; return +rr.dailyMax > 0 ? `<span class="note">Daily max ${money(rr.dailyMax)}${rr.rolling ? ' per 24 h from arrival' : ' · day resets ' + esc(String(rr.resetTime || '00:00'))}</span>` : ''; })()}</div>${s.mode === 'prepaid' ? `<div><small>Prepaid until</small><b>${fmtTime(s.paidUntil, tz)}</b></div>` : ''}</div></div>
       ${billTable(b, s)}
       ${done ? `<div class="receipt" role="status"><b>Paid ${money(done.amount)}${done.change > 0 ? ' · change due ' + money(done.change) : ''}</b><br>${s.endAt ? 'Ticket closed. ' : ''}<button class="btn sm" data-act="printReceipt" data-id="${esc(s.id)}">Print receipt</button> <button class="btn sm" data-act="deskClear">Next car <span class="kbd">F2</span></button></div>` : ''}
-      ${!s.endAt ? `<div class="row" style="gap:8px">
+      ${entry > 0 ? `<div class="receipt" role="status"><b>${esc(ev.name || 'Event')} night: collect ${money(entry)} at the entrance.</b><br>The ticket stays open and the exit is already paid. A car still inside after the ${esc(String(((R.facFor(s) || {}).rates || {}).resetTime || '03:00'))} reset owes the new day when it leaves.</div>
+      <div class="row" style="gap:8px"><button class="btn pri lg" data-act="deskPayEntry" data-id="${esc(s.id)}" data-perm="tickets">Collect ${money(entry)} event rate</button>${terminal ? `<button class="btn lg" data-act="deskTerminalEntry" data-id="${esc(s.id)}" data-perm="tickets">Square Terminal</button>` : ''}${S.validations.some(v => v.active && v.eventNights) ? `<button class="btn lg" data-act="validateSession" data-id="${esc(s.id)}" data-perm="tickets">Event-night code</button>` : ''}<button class="btn lg" data-act="openTicket" data-id="${esc(s.id)}">Details</button></div>` : !s.endAt ? `<div class="row" style="gap:8px">
         ${due > 0 ? `<button class="btn pri lg" data-act="deskPay" data-id="${esc(s.id)}" data-perm="tickets">Collect ${money(due)}</button>` : `<button class="btn pri lg" data-act="deskClose" data-id="${esc(s.id)}" data-perm="tickets">Close · nothing due</button>`}
         ${due > 0 && terminal ? `<button class="btn lg" data-act="deskTerminal" data-id="${esc(s.id)}" data-perm="tickets">Square Terminal</button>` : ''}
         ${due > 0 && hosted && member && window.chargeCardOnFile ? `<button class="btn lg" data-act="deskCardOnFile" data-id="${esc(s.id)}" data-perm="tickets">Card on file</button>` : ''}
@@ -2795,7 +2967,8 @@ render();boot();
           </div>
           ${hosted && (s.entryPhotoId || s.exitPhotoId) ? `<div class="thumbs">${[s.entryPhotoId, s.exitPhotoId].filter(Boolean).map(p => `<a href="/photos/${esc(p)}" target="_blank" rel="noopener"><img src="/photos/${esc(p)}" alt="Plate photo" loading="lazy"></a>`).join('')}</div>` : ''}
           <div class="row" style="gap:8px">
-            ${b.due > 0 && !R.needsReview(s) && !(s.missedExit && !s.missedResolved) ? act('deskPay', open ? `Collect ${money(b.due)} and close` : `Collect ${money(b.due)}`, 'tickets', 'pri') : ''}
+            ${open && R.entryDue(s) > 0 ? act('deskPayEntry', `Collect ${money(R.entryDue(s))} event rate`, 'tickets', 'pri') : ''}
+            ${b.due > 0 && !R.needsReview(s) && !(s.missedExit && !s.missedResolved) ? act('deskPay', open ? `Collect ${money(b.due)} and close` : `Collect ${money(b.due)}`, 'tickets', R.entryDue(s) > 0 ? '' : 'pri') : ''}
             ${b.due > 0 && terminal ? act('deskTerminal', 'Square Terminal', 'tickets') : ''}
             ${b.due > 0 && hosted && member && window.chargeCardOnFile ? act('deskCardOnFile', 'Charge card on file', 'tickets') : ''}
             ${open ? act('deskClose', b.due > 0 ? 'Let out unpaid' : 'Close ticket', b.due > 0 ? 'tickets.adjust' : 'tickets') : act('reopenTicket', 'Reopen', 'tickets.adjust')}
@@ -2978,7 +3151,7 @@ render();boot();
     dlgForm.innerHTML = `<div class="dlg-h"><h2>Add many to ${esc(co.name)}</h2><button type="button" class="btn sm" data-dlg="close">Close</button></div>
       <div class="dlg-b" style="display:grid;gap:12px">
         <p class="note" style="margin:0">Paste one person per line, or choose a spreadsheet saved as CSV. Columns: <b>name, email, plates, phone</b> (a header row is fine; add a <b>plan</b> column if people are on different plans). Several plates: separate with a semicolon. ${room.max ? `<b>${room.used.toLocaleString()} of ${room.max.toLocaleString()}</b> spaces are used, so up to <b>${room.left.toLocaleString()}</b> more can be added.` : 'This account has no parker limit.'}</p>
-        <div class="form-grid"><div class="field"><label for="abPlan">Plan for everyone (unless a row names one)</label><select id="abPlan">${plans.map(t => `<option value="${esc(t.id)}">${esc(t.name)} · ${money0(t.price)}/mo</option>`).join('')}</select></div>
+        <div class="form-grid"><div class="field"><label for="abPlan">Plan for everyone (unless a row names one)</label><select id="abPlan">${plans.map(t => `<option value="${esc(t.id)}">${esc(t.name)} · ${moneyP(t.price)}/mo</option>`).join('')}</select></div>
         <div class="field"><label for="abMonth">This month</label><select id="abMonth"><option value="no">Already paid for this month</option><option value="bill">New: bill the rest of this month</option></select></div></div>
         <div class="field"><label for="abFile">Spreadsheet (CSV)</label><input id="abFile" type="file" accept=".csv,.txt,text/csv,text/tab-separated-values"></div>
         <div class="field"><label for="abText">…or paste the list</label><textarea id="abText" rows="6" placeholder="Ana Reyes, ana@example.com, ABC1234, 817-555-0100&#10;Ben Ortiz, ben@example.com, XYZ987;QRS456"></textarea></div>
@@ -3022,6 +3195,8 @@ render();boot();
     deskPay(b) { const s = byId('sessions', b.dataset.id); window.payTicketDialog(b.dataset.id, { close: !s.endAt, after: () => { UI.deskTicket = b.dataset.id; } }); },
     deskClose(b) { window.closeTicketDialog(b.dataset.id); },
     deskTerminal(b) { if (window.terminalCheckout) window.terminalCheckout(b.dataset.id); },
+    deskPayEntry(b) { window.payTicketDialog(b.dataset.id, { entry: true, after: () => { UI.deskTicket = b.dataset.id; } }); },
+    deskTerminalEntry(b) { if (window.terminalCheckout) window.terminalCheckout(b.dataset.id, { entry: true }); },
     deskCardOnFile(b) { if (window.chargeCardOnFile) window.chargeCardOnFile(b.dataset.id); },
     newTicket(b) { window.newTicketDialog(b.dataset.plate || normPlate(UI.deskQ || ''), UI.deskFac); },
     newValet() { window.newTicketDialog('', UI.valetFac, true); },
@@ -3475,13 +3650,37 @@ render();boot();
     return inc.concat([1, 2, 3, 4, 6, 8]);
   }
   const hLabel = h => h < 1 ? Math.round(h * 60) + ' min' : h + ' hr' + (h > 1 ? 's' : '');
+  /* Locations drivers can pay ahead for: open to drivers and not a pay-on-exit garage. */
+  const prepayFacs = () => S.facilities.filter(f => f.active !== false && f.onlinePrepay !== false);
+  /* The duration buttons a location shows (Locations → Pay buttons): 'standard' = hours, then All day;
+     'cap' = hours until the price reaches the daily maximum, then one "N+ hrs" button that pays for the rest of the
+     parking day; 'allday' = a single All day price (flat-rate lots). */
+  function durButtons(f) {
+    const mode = (f && f.payButtons) || 'standard';
+    if (mode === 'allday') return [{ v: 'eod', label: 'All day' }];
+    const hrs = durOptions(f).map(h => ({ v: h, label: hLabel(h) })), max = +((f && f.rates) || {}).dailyMax || 0;
+    if (mode === 'cap' && max > 0) {
+      const t = Date.now(), free = Object.assign({}, f, { rates: Object.assign({}, f.rates, { graceMin: 0 }) });
+      const i = hrs.findIndex(x => R.charge(free, t, t + x.v * 3600e3) >= max - 0.004);
+      if (i >= 0) return hrs.slice(0, i).concat([{ v: 'eod', label: hrs[i].label.replace(/ (hrs?|min)$/, '') + '+ ' + (hrs[i].v < 1 ? 'min' : 'hrs') }]);
+    }
+    return hrs.concat([{ v: 'eod', label: 'All day' }]);
+  }
+  /* The choice in effect for a location: the driver's pick when that button exists, else the nearest one. */
+  function ppChoice(f) {
+    const btns = durButtons(f), pp = UI.pp, nums = btns.filter(b => b.v !== 'eod');
+    if (pp.eod && btns.some(b => b.v === 'eod')) return { eod: true, hours: 0 };
+    if (!pp.eod && nums.some(b => b.v === pp.hours)) return { eod: false, hours: pp.hours };
+    if (!nums.length || (pp.hours > nums[nums.length - 1].v && btns.some(b => b.v === 'eod'))) return { eod: true, hours: 0 };
+    return { eod: false, hours: (nums.find(b => b.v === 2) || nums[0]).v };
+  }
   function prepayForm(f, opts) {
     const o = opts || {}, pp = UI.pp, sms = HX.sms && HX.sms.enabled, locked = o.plate;
-    const facs = o.fixed ? null : S.facilities;
+    const facs = o.fixed ? null : prepayFacs(), ch = ppChoice(f);
     return `<form class="panel-b" data-form="prepayH" style="display:grid;gap:14px">
       ${locked ? `<div class="field"><label>License plate</label><div class="plate" style="font-size:1.2rem;justify-self:start">${esc(locked)}</div></div>` : plateField('pPlate', 'License plate', pp.plate != null ? pp.plate : (acctPlates()[0] || lastPlate()))}
       ${facs ? `<div class="field"><label for="pFac">Where are you parked?</label><select id="pFac">${facs.map(x => `<option value="${x.id}" ${x.id === (f && f.id) ? 'selected' : ''}>${esc(x.name)}${x.lotCode ? ' · Lot ' + esc(x.lotCode) : ''}</option>`).join('')}</select></div>` : ''}
-      <div class="field"><label>${o.extend ? 'Add how much time?' : 'How long?'}</label><div class="durs">${durOptions(f).map(h => `<button type="button" data-act="ppDur" data-v="${h}" aria-pressed="${!pp.eod && pp.hours === h}">${hLabel(h)}</button>`).join('')}<button type="button" data-act="ppDur" data-v="eod" aria-pressed="${!!pp.eod}">All day</button></div></div>
+      <div class="field"><label>${o.extend ? 'Add how much time?' : 'How long?'}</label><div class="durs">${durButtons(f).map(b => `<button type="button" data-act="ppDur" data-v="${b.v}" aria-pressed="${b.v === 'eod' ? ch.eod : !ch.eod && ch.hours === b.v}">${b.label}</button>`).join('')}</div></div>
       <div class="owed" style="border-color:var(--line);background:var(--surface-2)"><div><div class="quote" id="pQuote">—</div><div class="note" id="pUntil"></div></div><button class="btn pri lg" id="pGo">Continue to payment</button></div>
       ${sms ? `<div class="form-grid"><div class="field"><label for="pPhone">Mobile number (optional)</label><input id="pPhone" type="tel" autocomplete="tel" value="${esc(pp.phone != null ? pp.phone : ((HX.account && HX.account.phone) || lastPhone()))}"></div>
         <div class="field" style="align-self:end"><label class="checks" style="display:flex"><label><input type="checkbox" id="pSms" ${pp.sms === false ? '' : 'checked'}> Text me a receipt and a reminder 15 minutes before time runs out</label></label></div></div>
@@ -3493,10 +3692,10 @@ render();boot();
     const el = $('#pQuote'); if (!el) return;
     const facId = ($('#pFac') || {}).value || UI.ppFac, plate = normPlate((($('#pPlate') || {}).value) || (UI.extendInfo && UI.extendInfo.plate) || '');
     if (!facId) return;
-    const pp = UI.pp, seq = ++qSeq;
+    const ch = ppChoice(facById(facId)), seq = ++qSeq;
     clearTimeout(qT); qT = setTimeout(async () => {
       try {
-        const q = await api('GET', `/api/portal/quote?facilityId=${encodeURIComponent(facId)}&hours=${pp.eod ? 0 : pp.hours}&untilEndOfDay=${pp.eod ? 1 : 0}&plate=${encodeURIComponent(plate)}`);
+        const q = await api('GET', `/api/portal/quote?facilityId=${encodeURIComponent(facId)}&hours=${ch.eod ? 0 : ch.hours}&untilEndOfDay=${ch.eod ? 1 : 0}&plate=${encodeURIComponent(plate)}`);
         if (seq !== qSeq) return; UI.ppQuote = q;
         const f = facById(facId), tz = R.tzOf(f);
         $('#pQuote').textContent = q.amount > 0 ? money(q.total) : 'Covered';
@@ -3506,7 +3705,7 @@ render();boot();
     }, 200);
   }
   function startPrepay(fixedFac, extend) {
-    const facId = fixedFac || ($('#pFac') || {}).value, f = facById(facId), pp = UI.pp;
+    const facId = fixedFac || ($('#pFac') || {}).value, f = facById(facId), pp = ppChoice(f);
     const plate = normPlate(extend ? UI.extendInfo.plate : ($('#pPlate') || {}).value);
     if (!plate) { toast('Enter your license plate.', true); return; }
     if (!f) { toast('Choose where you’re parked.', true); return; }
@@ -3520,10 +3719,10 @@ render();boot();
 
   /* ---------- portal pages ---------- */
   function vHome() {
-    const first = S.facilities[0];
+    const list = prepayFacs(), first = list[0], cur = facById(($('#pFac') || {}).value), exitOnly = S.facilities.filter(f => f.active !== false && f.onlinePrepay === false);
     return `<div class="grid g2e">
-    <section class="panel"><div class="panel-h"><h2>Pay to park</h2></div>${first ? prepayForm(facById(($('#pFac') || {}).value) || first) : '<div class="empty">No parking locations yet.</div>'}
-      <p class="note" style="margin:0 16px 16px">Garages with cameras bill automatically when you leave, so prepaying is optional there. Lots with a pay sign need payment before you walk away.</p></section>
+    <section class="panel"><div class="panel-h"><h2>Pay to park</h2></div>${first ? prepayForm(cur && list.includes(cur) ? cur : first) : '<div class="empty">No parking locations take payment ahead.</div>'}
+      <p class="note" style="margin:0 16px 16px">${exitOnly.length ? `${esc(exitOnly.map(f => f.name).join(', '))} charge${exitOnly.length > 1 ? '' : 's'} you when you leave, so there’s nothing to pay ahead there. ` : 'Garages with cameras bill automatically when you leave, so prepaying is optional there. '}Lots with a pay sign need payment before you walk away.</p></section>
     <section class="panel"><div class="panel-h"><h2>Look up a plate</h2></div><div class="panel-b" style="display:grid;gap:12px">
       <form data-form="lookup" class="row"><div class="field"><label for="lkPlate">License plate</label><input id="lkPlate" autocomplete="off" style="text-transform:uppercase" placeholder="ABC1234" value="${esc(UI.lookup)}" data-fresh="1"></div><button class="btn">Look up</button></form>
       ${UI.lookupData ? lookupHosted(UI.lookupData) : '<p class="note" style="margin:0">See balances, citations, monthly parking and reservations for a plate.</p>'}</div></section>
@@ -3593,7 +3792,7 @@ render();boot();
     <div class="panel-b" style="display:grid;gap:14px"><div class="plans">${plans.map(t => { const left = +t.quota ? Math.max(0, t.quota - (t.sold || 0)) : null; return `<div class="plan"><span class="tag" style="justify-self:start">${t.kind === 'reserved' ? 'Reserved space' : 'Unreserved'}</span><b>${esc(t.name)}</b><b class="p num">${money(t.price)}<span class="muted" style="font-size:.85rem;font-weight:500">/month</span></b><span class="muted" style="font-size:.85rem">${esc(fnames(t))} · up to ${t.maxVehicles || 3} vehicles</span><span class="note">${left === 0 ? 'Full: join the waitlist' : left != null ? left + ' spots left' : 'Spots available'}</span></div>`; }).join('')}</div>
     ${!a ? `<div class="owed" style="border-color:var(--line);background:var(--surface-2)"><span>Sign in or create an account to start. Monthly parking is billed to the card on your account.</span><button class="btn pri" data-act="pv" data-v="account">Sign in or create account</button></div>`
       : !a.card ? `<div class="owed"><span>Add a card to your account first. It’s charged on the 1st of each month.</span><button class="btn pri" data-act="addCard">Add a card</button></div>`
-      : `<form data-form="monthlyH" style="display:grid;gap:12px"><div class="form-grid"><div class="field"><label for="moPlan">Plan</label><select id="moPlan">${plans.map(t => `<option value="${t.id}">${esc(t.name)} · ${money0(t.price)}/mo</option>`).join('')}</select></div>
+      : `<form data-form="monthlyH" style="display:grid;gap:12px"><div class="form-grid"><div class="field"><label for="moPlan">Plan</label><select id="moPlan">${plans.map(t => `<option value="${t.id}">${esc(t.name)} · ${moneyP(t.price)}/mo</option>`).join('')}</select></div>
         <div class="field"><label for="moPlates">License plates</label><input id="moPlates" style="text-transform:uppercase" value="${esc(acctPlates().join(', '))}"><div class="help">One car parks at a time.</div></div>
         <div class="field"><label for="moPhone">Mobile (for billing alerts)</label><input id="moPhone" type="tel" value="${esc(a.phone || '')}"></div></div>
         <div class="row"><button class="btn pri lg">Start monthly parking</button><span class="note">Charged to ${esc(a.card.brand || 'card')} ending ${esc(a.card.last4)}.</span></div></form>`}
@@ -3665,7 +3864,7 @@ render();boot();
     ${full ? '' : `<section class="panel"><div class="panel-h"><h2>Add an employee</h2></div><form class="panel-b" data-form="companyAdd" style="display:grid;gap:12px">
       <div class="form-grid"><div class="field"><label for="ceName">Name</label><input id="ceName"></div><div class="field"><label for="ceEmail">Email</label><input id="ceEmail" type="email"></div>
       <div class="field"><label for="cePhone">Mobile (optional)</label><input id="cePhone" type="tel"></div>
-      <div class="field"><label for="cePlan">Plan</label><select id="cePlan">${d.plans.map(p => `<option value="${esc(p.id)}">${esc(p.name)} · ${money0(p.price)}/mo${p.left === 0 ? ' · waitlist' : ''}</option>`).join('')}</select></div>
+      <div class="field"><label for="cePlan">Plan</label><select id="cePlan">${d.plans.map(p => `<option value="${esc(p.id)}">${esc(p.name)} · ${moneyP(p.price)}/mo${p.left === 0 ? ' · waitlist' : ''}</option>`).join('')}</select></div>
       <div class="field span"><label for="cePlates">License plates</label><input id="cePlates" style="text-transform:uppercase" placeholder="ABC1234, XYZ987"></div></div>
       <div><button class="btn pri">Add employee</button></div><p class="note" style="margin:0">The rest of this month is prorated onto your next bill. Removing someone ends their parking at the end of the paid month.${c.max ? ` You can add up to ${(c.left || 0).toLocaleString()} more.` : ''}</p></form></section>`}
     ${(d.invoices || []).length ? `<section class="panel"><div class="panel-h"><h2>Invoices</h2></div><div class="tbl-wrap"><table><thead><tr><th>Month</th><th class="r">Amount</th><th>Due</th><th>Status</th><th></th></tr></thead><tbody>${d.invoices.map(i => `<tr><td class="num">${esc(i.period)}</td><td class="r num">${money(i.amount)}</td><td class="num">${esc(i.dueDate || '')}</td><td>${ipill(i.status)}</td><td>${i.publicUrl && i.status !== 'PAID' ? `<a class="btn sm pri" href="${esc(i.publicUrl)}" target="_blank" rel="noopener">Pay</a>` : i.publicUrl ? `<a class="btn sm" href="${esc(i.publicUrl)}" target="_blank" rel="noopener">View</a>` : ''}</td></tr>`).join('')}</tbody></table></div></section>` : ''}
@@ -3723,7 +3922,7 @@ render();boot();
       dlgCfg = null;
       dlgForm.innerHTML = `<div class="dlg-h"><h2>Add several employees</h2><button type="button" class="btn sm" data-dlg="close">Close</button></div>
         <div class="dlg-b" style="display:grid;gap:12px"><p class="note" style="margin:0">Paste one person per line: <b>name, email, plates, phone</b>. Several plates: separate with a semicolon. ${c.max ? `You can add up to <b>${(c.left || 0).toLocaleString()}</b> more.` : ''} The rest of this month is added to your next bill.</p>
-          <div class="field"><label for="cbPlan">Plan</label><select id="cbPlan">${plans.map(p => `<option value="${esc(p.id)}">${esc(p.name)} · ${money0(p.price)}/mo${p.left === 0 ? ' · waitlist' : ''}</option>`).join('')}</select></div>
+          <div class="field"><label for="cbPlan">Plan</label><select id="cbPlan">${plans.map(p => `<option value="${esc(p.id)}">${esc(p.name)} · ${moneyP(p.price)}/mo${p.left === 0 ? ' · waitlist' : ''}</option>`).join('')}</select></div>
           <div class="field"><label for="cbText">The list</label><textarea id="cbText" rows="7" placeholder="Ana Reyes, ana@example.com, ABC1234, 817-555-0100&#10;Ben Ortiz, ben@example.com, XYZ987;QRS456"></textarea></div>
           <div id="cbPrev"></div><p id="cbErr" class="pill bad" hidden></p></div>
         <div class="dlg-f"><button type="button" class="btn" data-dlg="close">Cancel</button><button type="button" class="btn" id="cbCheck">Preview</button><button type="button" class="btn pri" id="cbGo" disabled>Add</button></div>`;
@@ -4028,10 +4227,11 @@ render();boot();
     const c = $('#termCancel', dlgForm); if (c) c.hidden = !state.cancel;
     const d = $('#termDone', dlgForm); if (d) d.hidden = !state.done;
   }
-  window.terminalCheckout = async function (id) {
-    const s = byId('sessions', id); if (!s) return;
-    const f = facById(s.facilityId), due = R.balanceOf(s); if (!(due > 0)) { toast('Nothing is owed on this ticket.'); return; }
-    const closeAfter = !s.endAt;
+  window.terminalCheckout = async function (id, opts) {
+    const s = byId('sessions', id); if (!s) return; opts = opts || {};
+    // opts.entry: event night, the flat event rate is charged at the entrance and the ticket stays open.
+    const f = facById(s.facilityId), due = opts.entry ? R.entryDue(s) : R.balanceOf(s); if (!(due > 0)) { toast('Nothing is owed on this ticket.'); return; }
+    const closeAfter = !s.endAt && !opts.entry;
     dlgCfg = null; clearTimeout(termTimer);
     dlgForm.innerHTML = `<div class="dlg-h"><h2>Square Terminal · ${esc(s.plate)}</h2><button type="button" class="btn sm" data-dlg="close">Close</button></div>
       <div class="dlg-b"><div id="termBox"></div><p class="note" style="margin:0">The amount is sent to the Terminal at ${esc(f ? f.name : 'the booth')}${HX.terminal && HX.terminal.simulated ? ' (simulated until Square is connected)' : ''}. The driver taps or inserts their card on the device. ${closeAfter ? 'The ticket closes when the payment goes through.' : ''}</p></div>
@@ -4039,7 +4239,7 @@ render();boot();
     dlg.showModal();
     terminalBox({ amount: R.taxOf(due).total, text: 'Sending to the Terminal…', busy: true });
     let ck;
-    try { ck = await api('POST', '/api/tickets/' + encodeURIComponent(id) + '/terminal', { close: closeAfter }); }
+    try { ck = await api('POST', '/api/tickets/' + encodeURIComponent(id) + '/terminal', { close: closeAfter, amount: opts.entry ? due : undefined }); }
     catch (e) { terminalBox({ amount: R.taxOf(due).total, text: 'Couldn’t start the Terminal payment', sub: e.message, done: true }); return; }
     const amount = ck.amount;
     $('#termCancel', dlgForm).onclick = async () => { try { await api('POST', '/api/terminal/' + encodeURIComponent(ck.checkoutId) + '/cancel', {}); } catch (e) { toast(e.message, true); } };

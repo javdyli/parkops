@@ -200,8 +200,18 @@ function limited(req, key, perMin) {
   if (t - b.t > 60000) { b.n = 0; b.t = t; } b.n++; buckets.set(k, b); return b.n > perMin;
 }
 setInterval(() => { const t = Date.now(); for (const [k, b] of buckets) if (t - b.t > 120000) buckets.delete(k); }, 60000).unref();
-let idxCache = { m: 0, buf: null };
-const INDEX = () => { const f = here('public', 'index.html'), m = fs.statSync(f).mtimeMs; if (idxCache.m !== m) idxCache = { m, buf: fs.readFileSync(f) }; return idxCache.buf; };
+let idxCache = { m: 0, name: null, buf: null };
+/* The page carries the organization's name (browser tab, home-screen name, top bar) from the first byte, so drivers
+   never see the product name flash by before the data loads. */
+const INDEX = () => {
+  const f = here('public', 'index.html'), m = fs.statSync(f).mtimeMs, name = String(cfg().campusName || '').trim();
+  if (idxCache.m !== m || idxCache.name !== name) {
+    let html = fs.readFileSync(f, 'utf8');
+    if (name) { const e = escH(name); html = html.replace('<title>ParkOps</title>', `<title>${e}</title>`).replace('name="apple-mobile-web-app-title" content="ParkOps"', `name="apple-mobile-web-app-title" content="${e}"`).replace('<b id="campusName">ParkOps</b>', `<b id="campusName">${e}</b>`); }
+    idxCache = { m, name, buf: Buffer.from(html, 'utf8') };
+  }
+  return idxCache.buf;
+};
 const escH = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const money = n => '$' + (Math.round((+n || 0) * 100) / 100).toFixed(2);
 const orgName = () => cfg().campusName || 'Parking';
@@ -215,8 +225,8 @@ const LOGIN = err => `<!doctype html><html lang="en"><head><meta charset="utf-8"
 body{margin:0;min-height:100vh;display:grid;place-items:center;background:var(--bg);color:var(--fg);font:15px/1.45 system-ui,sans-serif;padding:16px;box-sizing:border-box}
 form{background:var(--s);border:1px solid var(--l);border-radius:10px;padding:24px;width:min(360px,100%);display:grid;gap:12px;box-sizing:border-box}h1{margin:0;font-size:1.4rem}
 label{font-size:.8rem;font-weight:600;color:var(--m)}input,button{font:inherit;padding:10px;border-radius:6px;border:1px solid var(--l);background:var(--bg);color:var(--fg)}button{background:var(--a);border-color:var(--a);color:#fff;font-weight:600;cursor:pointer}.e{color:var(--bad);font-size:.9rem}a{color:var(--a);font-size:.9rem}</style></head>
-<body><form method="post" action="/login"><h1>Staff sign in</h1>${err ? `<div class="e">${escH(err)}</div>` : ''}<label for="em">Email</label><input id="em" name="email" autocomplete="username" required autofocus>
-<label for="pw">Password</label><input id="pw" name="password" type="password" autocomplete="current-password" required><button>Sign in</button><a href="/">Driver portal</a></form></body></html>`;
+<body><form method="post" action="/login"><h1>Staff sign in</h1>${cfg().campusName ? `<p style="margin:0;color:var(--m)">${escH(cfg().campusName)}</p>` : ''}${err ? `<div class="e">${escH(err)}</div>` : ''}<label for="em">Email</label><input id="em" name="email" autocomplete="username" required autofocus>
+<label for="pw">Password</label><input id="pw" name="password" type="password" autocomplete="current-password" required><button>Sign in</button><a href="/">Driver portal</a><p style="margin:4px 0 0;color:var(--m);font-size:.75rem;text-align:center">Powered by Avid Parking Systems</p></form></body></html>`;
 const WELCOME = (u, err, token) => LOGIN(err).replace('<title>Staff sign in</title>', '<title>Welcome</title>').replace(/<form[\s\S]*<\/form>/, u
   ? `<form method="post" action="/staff/welcome"><h1>Welcome, ${escH(u.name.split(' ')[0])}</h1><p style="margin:0;color:var(--m)">You’re ${escH(Rules.ROLE_NAMES[Rules.canonRole(u.role)] || u.role)} on ${escH(orgName())} parking operations. Choose a password to finish.</p>${err ? `<div class="e">${escH(err)}</div>` : ''}<input type="hidden" name="token" value="${escH(token || '')}"><label for="em">Email</label><input id="em" value="${escH(u.email)}" disabled>
 <label for="pw">Password (10+ characters)</label><input id="pw" name="password" type="password" autocomplete="new-password" required autofocus minlength="10"><button>Save and sign in</button></form>`
@@ -331,7 +341,7 @@ function taxFromTotal(total) {
    tapping (a validation applied meanwhile): the money is recorded and any excess is flagged for a refund. */
 async function applyCardPayment(s, amt, method, pid, staffName, closeTicket, note, actor, fullBalance) {
   const cur = S.sessions.find(x => x.id === s.id) || s;
-  const due = R.balanceOf(cur), t = Date.now();
+  const due = Math.max(R.balanceOf(cur), R.entryDue(cur)), t = Date.now();
   let r = due > 0.004 ? R.TICKET.pay(cur, { amount: Math.min(amt, due), method, pid, by: staffName, close: closeTicket, note, quoted: fullBalance === false ? null : amt }) : null;
   if (!r || r.error) {
     const payment = { amount: amt, at: t, method, by: staffName, note: (note ? note + ' · ' : '') + 'received after the balance was cleared; refund if it is not owed', pid };
@@ -349,7 +359,8 @@ async function startTerminal(res, s, args, staff) {
   const deviceId = String(args.deviceId || (f && f.terminalDeviceId) || process.env.SQUARE_TERMINAL_DEVICE_ID || (!square.live ? 'simulated-terminal' : '')).trim();
   if (!deviceId) return fail(res, 400, 'No Square Terminal is set up for this location. Add its device ID under Locations & rates → Edit.', 'no_device');
   if (R.needsReview(s) || (s.missedExit && !s.missedResolved)) return fail(res, 400, 'Resolve the plate review first.');
-  const due = R.balanceOf(s); if (!(due > 0)) return fail(res, 400, 'Nothing is owed on this ticket.');
+  // Event nights: the flat event rate can be charged at the entrance, before anything is owed by the clock.
+  const due = Math.max(R.balanceOf(s), R.entryDue(s)); if (!(due > 0)) return fail(res, 400, 'Nothing is owed on this ticket.');
   const amt = args.amount != null && args.amount !== '' ? round2(args.amount) : due;
   if (!(amt > 0) || amt > due + 0.005) return fail(res, 400, `Enter an amount up to ${money(due)}.`);
   const open = store.get("SELECT * FROM terminals WHERE session_id=? AND status IN ('PENDING','IN_PROGRESS') AND applied=0 ORDER BY created_at DESC", s.id);
@@ -1055,7 +1066,8 @@ async function route(req, res) {
   if (p === '/api/lpr/import' && m === 'POST') {
     if (!can(staff, 'cameras')) return fail(res, 403, 'Only managers and the owner can import reads.', 'forbidden');
     const b = await readJson(req); const reads = (b.reads || []).slice(0, 500).sort((a, c) => (a.at || 0) - (c.at || 0));
-    let count = 0; for (const x of reads) { const r = R.planRead(x); if (!r.error) { await commit(r.ops); afterRead(r.result, S.cameras.find(c => c.id === x.cameraId) || { name: 'import' }); count++; } }
+    // Imported history: reads more than 2 hours old build the visits but don't charge saved cards or send alerts.
+    let count = 0; for (const x of reads) { const r = R.planRead(x); if (!r.error) { await commit(r.ops); if (!(x.at < Date.now() - 2 * H)) afterRead(r.result, S.cameras.find(c => c.id === x.cameraId) || { name: 'import' }); count++; } }
     store.audit(actorOf(staff), 'import_reads', null, null, { count }); return send(res, 200, { count });
   }
 

@@ -3,6 +3,8 @@ const $=(s,r=document)=>r.querySelector(s);
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const money=n=>(n<0?'-':'')+'$'+Math.abs(Math.round((+n||0)*100)/100).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
 const money0=n=>'$'+Math.round(+n||0).toLocaleString('en-US');
+/* Prices people pay (monthly plans): whole dollars when the price is whole, otherwise to the cent ($178.61, not $179). */
+const moneyP=n=>Math.abs((+n||0)-Math.round(+n||0))<0.005?money0(n):money(n);
 const normPlate=ParkRules.normPlate;
 const now=()=>Date.now();
 const M=6e4,H=36e5,D=864e5;
@@ -43,13 +45,13 @@ const can=p=>S.perms.has(p);
 const setRole=r=>{S.role=ParkRules.canonRole(r||'viewer');S.perms=new Set(ParkRules.ROLES[S.role]||[])};
 const actorName=()=>(HOSTED&&HOSTED.user&&HOSTED.user.name)||store.get('officer')||'Staff';
 /* Which permission each button or form needs. The server checks the same table; this only greys things out. */
-const ACT_PERM={editFacility:'facilities',editRates:'facilities',makeSign:'facilities',recount:'facilities',editTenant:'validations',editValidation:'validations',toggleValidation:'validations',editType:'monthly',issuePermit:'monthly',approvePermit:'monthly',denyPermit:'monthly',reinstatePermit:'monthly',officePaid:'monthly',endMonthly:'monthly',editPermit:'monthly',editCompany:'monthly',sendCompanyLink:'monthly',runBilling:'monthly',invoicePaid:'monthly',importMonthly:'import',editCamera:'cameras',citePaid:'citations.decide',citeVoid:'citations.decide',appealDecide:'citations.decide',citeSession:'citations',addViolation:'settings',clearSamples:'settings',refreshSamples:'settings',pruneSessions:'settings',removeMember:'monthly',staffCancelRes:'reservations',refund:'refunds',addUser:'users',editUser:'users',backupNow:'settings',markSessionPaid:'tickets',waiveSession:'tickets.adjust',closeSession:'tickets',validateSession:'tickets',closeMissed:'tickets.adjust',confirmMatch:'tickets.adjust',rejectMatch:'tickets.adjust',missedBill:'tickets.adjust',missedFree:'tickets.adjust'};
+const ACT_PERM={impRun:'cameras',editFacility:'facilities',editRates:'facilities',makeSign:'facilities',recount:'facilities',editTenant:'validations',editValidation:'validations',toggleValidation:'validations',editType:'monthly',issuePermit:'monthly',approvePermit:'monthly',denyPermit:'monthly',reinstatePermit:'monthly',officePaid:'monthly',endMonthly:'monthly',editPermit:'monthly',editCompany:'monthly',acctAdd:'monthly',acctBulk:'monthly',sendCompanyLink:'monthly',runBilling:'monthly',invoicePaid:'monthly',importMonthly:'import',editCamera:'cameras',citePaid:'citations.decide',citeVoid:'citations.decide',appealDecide:'citations.decide',citeSession:'citations',addViolation:'settings',clearSamples:'settings',refreshSamples:'settings',pruneSessions:'settings',removeMember:'monthly',staffCancelRes:'reservations',refund:'refunds',addUser:'users',editUser:'users',backupNow:'settings',markSessionPaid:'tickets',waiveSession:'tickets.adjust',closeSession:'tickets',validateSession:'tickets',closeMissed:'tickets.adjust',confirmMatch:'tickets.adjust',rejectMatch:'tickets.adjust',missedBill:'tickets.adjust',missedFree:'tickets.adjust'};
 const FORM_PERM={settings:'settings',violations:'settings',lprRead:'cameras',cite:'citations'};
 /* One entry point for every ticket action, in both builds. Hosted: the server runs the planner and checks the role. */
 async function ticketAction(id,action,args,okMsg){
   args=Object.assign({by:actorName()},args||{});
   if(HOSTED){try{const r=await HOSTED.api('POST',action==='create'?'/api/tickets':'/api/tickets/'+encodeURIComponent(id)+'/'+action,args);if(okMsg)toast(typeof okMsg==='function'?okMsg(r):okMsg);return r}catch(e){toast(e.message,true);return {error:e.message}}}
-  args.allowBackdate=can('tickets.adjust');const s=id?byId('sessions',id):null;const r=action==='create'?R.TICKET.create(args):R.TICKET[action](s,args);
+  args.allowBackdate=can('tickets.adjust');args.allowUnpaid=can('tickets.adjust');args.requireFull=!can('tickets.adjust');const s=id?byId('sessions',id):null;const r=action==='create'?R.TICKET.create(args):R.TICKET[action](s,args);
   if(r.error){toast(r.error,true);return r}
   applyLocal(r.ops);const ok=await write(db=>execOps(db,r.ops));if(!ok)return {error:'Couldn’t save.'};
   if(okMsg)toast(typeof okMsg==='function'?okMsg(r):okMsg);return r;
@@ -99,6 +101,7 @@ async function saveFile(name,text){
   if(!d){toast('Downloads aren’t available in this view.',true);return}
   try{await d.save({filename:name,data:new Blob([text],{type:'text/csv'})})}catch(e){if(e&&e.code!=='declined')toast('Couldn’t save the file: '+(e.message||e.code),true)}
 }
+const safeCell=v=>/^[=+\-@]/.test(String(v||''))?"'"+v:v;
 const csv=rows=>rows.map(r=>r.map(v=>{v=String(v??'');return /[",\n]/.test(v)?'"'+v.replace(/"/g,'""')+'"':v}).join(',')).join('\n');
 
 /* ============ boot ============ */
@@ -135,9 +138,9 @@ function render(){
   if(S.roles&&!S.roles.includes(UI.role))UI.role=S.roles[0];
   const rolesEl=$('.roles');rolesEl.hidden=!S.roles||S.roles.length<2;
   document.querySelectorAll('.roles button').forEach(b=>{b.hidden=!(S.roles||[]).includes(b.dataset.role);b.setAttribute('aria-pressed',b.dataset.role===UI.role)});
-  $('#campusName').textContent=campusName();$('#brandSub').textContent=canEditOps()?(HOSTED?ParkRules.ROLE_NAMES[S.role]||'Parking operations':'Parking operations'):'Parking services';
+  $('#campusName').textContent=campusName();if(document.title!==campusName())document.title=campusName();$('#brandSub').textContent=canEditOps()?(HOSTED?ParkRules.ROLE_NAMES[S.role]||'Parking operations':'Parking operations'):'Parking services';
   applyBrand();
-  if(TAB_PERM[UI.tab]&&!can(TAB_PERM[UI.tab]))UI.tab='overview';
+  if(!tabAllowed(UI.tab))UI.tab='overview';
   renderTabs();
   const main=$('#main');const snap=snapForm(main);
   let html='';
@@ -156,12 +159,14 @@ function afterRender(){updateQuote();updateTypeInfo();
 }
 function applyBrand(){const c=S.config||{};const r=document.documentElement.style;if(c.brandColor&&/^#[0-9a-f]{6}$/i.test(c.brandColor))r.setProperty('--accent',c.brandColor);else r.removeProperty('--accent');if(c.brandStripe&&/^#[0-9a-f]{6}$/i.test(c.brandStripe))r.setProperty('--stripe',c.brandStripe);else r.removeProperty('--stripe')}
 const TABS=[['overview','Overview'],['selfparking','Self-parking'],['activity','Occupancy'],['review','Plate review'],['tenants','Validations'],['valet','Valet'],['permits','Monthly'],['facilities','Locations'],['citations','Notices'],['lpr','Cameras'],['reports','Reports'],['settings','Settings']];
-if(HOSTED){TABS.splice(7,0,['reservations','Reservations']);TABS.splice(11,0,['payments','Payments'])}
-const TAB_PERM={settings:'settings',reports:'reports',payments:'payments'};
+if(HOSTED){TABS.splice(7,0,['reservations','Reservations']);TABS.splice(11,0,['payments','Payments'],['daily','By day'],['history','History'])}
+const TAB_PERM={settings:'settings',reports:'reports',payments:'payments',history:['tickets','reports'],daily:'reports'};
+/* A tab needs one permission, or any one of a list. */
+const tabAllowed=k=>!TAB_PERM[k]||[].concat(TAB_PERM[k]).some(x=>can(x));
 function renderTabs(){
   const t=$('#tabs');t.hidden=UI.role!=='ops';if(t.hidden)return;
   const counts={permits:S.permits.filter(p=>p.status==='pending'||p.status==='waitlist'||p.status==='suspended').length,citations:S.citations.filter(c=>c.status==='appeal').length,selfparking:R.unpaidSessions().length,review:reviewList().length,valet:S.sessions.filter(s=>s.valet&&!s.endAt&&s.valet.status==='requested').length};
-  t.innerHTML=TABS.filter(([k])=>!TAB_PERM[k]||can(TAB_PERM[k])).map(([k,l])=>`<button role="tab" data-tab="${k}" aria-selected="${UI.tab===k}">${l}${counts[k]?`<span class="badge">${counts[k]}</span>`:''}</button>`).join('');
+  t.innerHTML=TABS.filter(([k])=>tabAllowed(k)).map(([k,l])=>`<button role="tab" data-tab="${k}" aria-selected="${UI.tab===k}">${l}${counts[k]?`<span class="badge">${counts[k]}</span>`:''}</button>`).join('');
 }
 
 /* ============ charts ============ */
@@ -238,13 +243,17 @@ function attentionItems(){
   if(noEntry.length)it.push({sev:'warn',t:`${noEntry.length} exit${noEntry.length>1?'s':''} in the last 24 hours had no matching entry read`,go:'review'});
   if(stale.length)it.push({sev:'warn',t:`${stale.length} vehicle${stale.length>1?'s have':' has'} been on site over ${R.staleHours()} hours. Check for missed exit reads.`,go:'review'});
   S.tenants.forEach(t=>{const d=R.tenantDays(t,1)[0];if(d&&d.over>0)it.push({sev:'bad',t:`${t.name} valet is ${d.over} over its ${t.allotment}-space allotment today (peak ${d.peak})`,go:'tenants',tenant:t.id})});
-  S.facilities.forEach(f=>{const p=R.occupancy(f)/(+f.capacity||1);if(p>=.9)it.push({sev:'bad',t:`${f.name} is ${Math.round(p*100)}% full`,go:'activity',fac:f.id})});
+  const rep=R.repeatValidations();if(rep.length)it.push({sev:'warn',t:`${rep.length} car${rep.length>1?'s':''} used the same validation code ${rep[0].min}+ times in ${rep[0].days} days (most: ${rep[0].plate} with ${rep[0].code}${rep[0].business?' · '+rep[0].business:''}, ${rep[0].count} times)`,go:'tenants'});
+  S.facilities.forEach(f=>{if(!(+f.capacity>0))return;const u=R.spaceUse(f);if(u.pct>=.9)it.push({sev:'bad',t:`${f.name} is ${Math.round(u.pct*100)}% full (${u.available} open, ${u.monthly} held for monthly)`,go:'activity',fac:f.id})});
   if(wl.length)it.push({sev:'info',t:`${wl.length} driver${wl.length>1?'s':''} on a monthly waitlist`,go:'permits',f:'waitlist'});
+  /* Availability: spaces that have opened up for people who are waiting. */
+  if(wl.length){const waitBy={},usedBy={};wl.forEach(p=>{waitBy[p.permitTypeId]=(waitBy[p.permitTypeId]||0)+1});S.permits.forEach(p=>{if(p.status!=='waitlist'&&holdsSpace(p))usedBy[p.permitTypeId]=(usedBy[p.permitTypeId]||0)+1});
+    S.permitTypes.forEach(t=>{const q=+t.quota||0,w=waitBy[t.id]||0,free=q-(usedBy[t.id]||0);if(q&&w&&free>0)it.push({sev:'warn',t:`${t.name}: ${free} space${free>1?'s are':' is'} free and ${w} ${w>1?'people are':'person is'} waiting. Approve them from the waitlist.`,go:'permits',f:'waitlist'})})}
   return it;
 }
 function vOverview(){
   if(!S.facilities.length)return emptyFacilities();
-  const cap=sum(S.facilities,f=>f.capacity),occ=sum(S.facilities,R.occupancy);
+  const cap=sum(S.facilities,f=>f.capacity),occ=sum(S.facilities,R.occupancy);const uses=S.facilities.map(R.spaceUse),avail=sum(uses,u=>u.available),held=sum(uses,u=>u.monthly),usedAll=sum(uses,u=>u.used);
   const days=revenueByDay(7);const today=days[days.length-1];const tToday=today.parking+today.citations+today.permits;const t7=sum(days,d=>d.parking+d.citations+d.permits);
   const openC=S.citations.filter(c=>c.status==='open'||c.status==='appeal');
   const att=attentionItems();const pct=cap?Math.round(occ/cap*100):0;
@@ -256,7 +265,7 @@ function vOverview(){
   <div class="pagehead"><div><h1>${esc(campusName())}</h1><p>${new Date().toLocaleDateString([], {weekday:'long',month:'long',day:'numeric'})} · ${S.facilities.length} facilities · ${cap.toLocaleString()} spaces</p></div>
     <button class="btn" data-role-go="enf">Open officer view</button></div>
   <div class="kpis">
-    <div class="kpi"><small>Vehicles on site</small><b>${occ.toLocaleString()}</b><span class="num">${pct}% of ${cap.toLocaleString()} spaces</span></div>
+    <div class="kpi"><small>Spaces available</small><b>${avail.toLocaleString()}</b><span class="num">${occ.toLocaleString()} parked · ${held.toLocaleString()} held for monthly · ${cap?Math.round(usedAll/cap*100):0}% of ${cap.toLocaleString()} in use</span></div>
     <div class="kpi"><small>Revenue today</small><b>${money0(tToday)}</b><span>${money0(today.parking)} parking · ${money0(today.citations)} notices</span></div>
     <div class="kpi"><small>Last 7 days</small><b>${money0(t7)}</b><span>Parking, monthly and notices</span></div>
     <div class="kpi ${unpaidToday.length?'alert':''}"><small>Exits not charged today</small><b>${unpaidToday.length}</b><span>${money(sum(unpaidToday,R.balanceOf))} owed · ${exitsToday.length} exits today</span></div>
@@ -264,7 +273,7 @@ function vOverview(){
     <div class="kpi"><small>Open notices</small><b>${openC.length}</b><span>${money(sum(openC,c=>c.fine))} outstanding</span></div>
     <div class="kpi ${att.length?'alert':''}"><small>Needs attention</small><b>${att.length}</b><span>${att.length?'See list below':'All clear'}</span></div>
   </div>
-  <section class="panel"><div class="panel-h"><h2>Facilities right now</h2><span class="muted" style="font-size:.84rem">Garages count from lane cameras; QR lots count paid sessions</span></div>
+  <section class="panel"><div class="panel-h"><h2>Facilities right now</h2><span class="muted" style="font-size:.84rem">Open spaces after visitors and monthly parkers. Garages count visitors from lane cameras; QR lots count paid sessions</span></div>
     <div class="panel-b"><div class="facs">${S.facilities.map(facCard).join('')}</div></div></section>
   <div class="grid g2">
     <section class="panel"><div class="panel-h"><h2>Revenue, last 7 days</h2><div class="legend"><span><i style="background:var(--accent)"></i>Parking</span><span><i style="background:var(--ok)"></i>Monthly</span><span><i style="background:var(--stripe)"></i>Notices</span></div></div>
@@ -275,11 +284,11 @@ function vOverview(){
   <section class="panel"><div class="panel-h"><h2>Latest camera reads</h2><button class="btn sm" data-act="goTab" data-tab="lpr">All reads</button></div>${feedTable(S.feed.slice(0,6))}</section>`;
 }
 function facCard(f){
-  const o=R.occupancy(f),c=+f.capacity||0,p=c?o/c:0;const cls=p>=.9?'bad':p>=.75?'warn':'';
+  const u=R.spaceUse(f),c=u.capacity,p=u.pct;const cls=p>=.9?'bad':p>=.75?'warn':'';
   const ds=R.dayStart(now(),f);const ins=S.sessions.filter(s=>s.facilityId===f.id&&s.startAt>=ds).length,outs=S.sessions.filter(s=>s.facilityId===f.id&&s.endAt>=ds).length;
-  return `<button class="fac" data-act="goTab" data-tab="activity" data-fac="${f.id}"><div class="fac-top"><div><h3>${esc(f.name)}</h3><span class="tag">${f.type==='lot'?'Surface lot':'Garage'}</span> ${f.payMode==='qr'?`<span class="tag">QR pay${f.lotCode?' · '+esc(f.lotCode):''}</span>`:S.cameras.some(c=>c.facilityId===f.id)?`<span class="tag">${S.cameras.filter(c=>c.facilityId===f.id).length} lanes</span>`:'<span class="tag">No cameras</span>'}</div><div class="pct">${o.toLocaleString()}</div></div>
+  return `<button class="fac" data-act="goTab" data-tab="activity" data-fac="${f.id}"><div class="fac-top"><div><h3>${esc(f.name)}</h3><span class="tag">${f.type==='lot'?'Surface lot':'Garage'}</span> ${f.payMode==='qr'?`<span class="tag">QR pay${f.lotCode?' · '+esc(f.lotCode):''}</span>`:S.cameras.some(c=>c.facilityId===f.id)?`<span class="tag">${S.cameras.filter(c=>c.facilityId===f.id).length} lanes</span>`:'<span class="tag">No cameras</span>'}${f.active===false?' <span class="tag">Closed to drivers</span>':''}</div><div class="pct" title="Spaces open">${c?u.available.toLocaleString():'—'}<span class="muted" style="font-size:.7rem;display:block;text-align:right">open</span></div></div>
   <div class="bar ${cls}"><i style="width:${Math.min(100,p*100)}%"></i></div>
-  <div class="fac-meta num"><span>${Math.round(p*100)}% of ${c.toLocaleString()}</span><span>${ins} in · ${outs} out today</span></div></button>`;
+  <div class="fac-meta num"><span>${c?`${u.visitors} parked · ${u.monthly} monthly · ${Math.round(p*100)}% of ${c.toLocaleString()}`:'Enter the number of spaces'}</span><span>${ins} in · ${outs} out today</span></div></button>`;
 }
 function feedTable(rows){
   if(!rows.length)return '<div class="empty">No camera reads yet.</div>';
@@ -294,7 +303,7 @@ function vActivity(){
   if(!S.facilities.length)return emptyFacilities();
   if(!facById(UI.actFac))UI.actFac=(S.facilities.find(x=>x.payMode!=='qr')||S.facilities[0]).id;
   const f=facById(UI.actFac),tz=tzF(f),ds=R.dayStart(now(),f),de=R.nextDayStart(ds,f);
-  const on=R.onSiteSessions(f),occ=R.occupancy(f),cap=+f.capacity||0;
+  const on=R.onSiteSessions(f),occ=R.occupancy(f),cap=+f.capacity||0,u=R.spaceUse(f);
   const tracked=on.filter(s=>!s.noPlate).length,unknown=on.filter(s=>s.noPlate).length,adj=+f.baseline||0;
   const facS=S.sessions.filter(s=>s.facilityId===f.id);
   const conc=R.concurrency(facS.filter(s=>s.startAt&&!s.noEntry),ds,de);
@@ -310,8 +319,8 @@ function vActivity(){
     <select id="actFac" data-fresh="1" style="width:auto">${S.facilities.map(x=>`<option value="${x.id}" ${x.id===f.id?'selected':''}>${esc(x.name)}</option>`).join('')}</select></div>
   <div class="grid g2">
     <section class="panel"><div class="panel-h"><h2>In ${esc(f.name)} now</h2><button class="btn sm" data-act="recount" data-id="${f.id}">Enter a physical count</button></div><div class="panel-b" style="display:grid;gap:12px">
-      <div class="big-count"><b>${occ.toLocaleString()}</b><span>of ${cap.toLocaleString()} spaces · ${cap?Math.round(occ/cap*100):0}% full · ${Math.max(0,cap-occ).toLocaleString()} open</span></div>
-      <div class="bar ${occ/cap>=.9?'bad':occ/cap>=.75?'warn':''}"><i style="width:${cap?Math.min(100,occ/cap*100):0}%"></i></div>
+      <div class="big-count"><b>${u.available.toLocaleString()}</b><span>spaces open of ${cap.toLocaleString()} · ${u.visitors.toLocaleString()} visitors parked · ${u.monthly.toLocaleString()} held for monthly parkers (${u.monthlyInside} inside now) · ${cap?Math.round(u.pct*100):0}% in use</span></div>
+      <div class="bar ${u.pct>=.9?'bad':u.pct>=.75?'warn':''}"><i style="width:${cap?Math.min(100,u.pct*100):0}%"></i></div>
       <div class="split"><span><b>${tracked}</b> plates read in</span><span><b>${unknown}</b> no-plate entries</span><span><b>${adj>=0?'+':''}${adj}</b> count adjustment</span><span><b>${ins}</b> entries today</span><span><b>${outs}</b> exits today</span><span><b>${conc.peak+adj}</b> peak today at ${fmtTime(conc.peakAt,tz)}</span></div>
     </div></section>
     <section class="panel"><div class="panel-h"><h2>Charge check</h2><span class="muted" style="font-size:.84rem">${UI.auditRange==='today'?'Today':UI.auditRange==='yesterday'?'Yesterday':'Last 7 days'}</span></div><div class="panel-b"><div class="summary-row">
@@ -354,13 +363,16 @@ function vTenants(){
         <div class="chart">${peakBars(days,allot,tz)}</div></div>
       <div class="tbl-wrap"><table><thead><tr><th>Parking day</th><th class="r">Validated cars</th><th class="r">Peak</th><th>Peak time</th><th class="r">Over</th><th class="r">Charge</th></tr></thead><tbody>${[...days].reverse().filter(d=>d.cars||d.peak).map(d=>`<tr><td>${fmtDay(d.start+12*H,tz)}</td><td class="r num">${d.cars}</td><td class="r num">${d.peak}</td><td class="num">${d.peak?fmtTime(d.peakAt,tz):'—'}</td><td class="r num">${d.over?`<span class="pill bad">${d.over}</span>`:'0'}</td><td class="r num">${money(d.charge)}</td></tr>`).join('')||'<tr><td colspan="6" class="empty">No validated stays in the last 30 days.</td></tr>'}</tbody></table></div></section>`;
   }
+  const rep=R.repeatValidations(),tz0=tzF(S.facilities[0]);
+  const repPanel=rep.length?`<section class="panel"><div class="panel-h"><h2>Repeat use to review</h2><span class="muted" style="font-size:.84rem">The same car used the same code ${rep[0].min} or more times in ${rep[0].days} days. Change these numbers in Settings.</span></div><div class="tbl-wrap"><table><thead><tr><th>Plate</th><th>Code</th><th>Business</th><th class="r">Visits</th><th>Last visit</th></tr></thead><tbody>${rep.map(e=>`<tr><td>${plateChip(e.plate)}</td><td class="mono"><b>${esc(e.code)}</b></td><td>${esc(e.business)}</td><td class="r num">${e.count}</td><td class="num">${fmtTime(e.last,tz0)}</td></tr>`).join('')}</tbody></table></div></section>`:'';
   return `<div class="pagehead"><div><h1>Validations & tenants</h1><p>Validation codes, tenant allotments and how many validated cars were parked at once. Overage = cars over the allotment at the daily peak.</p></div><button class="btn" data-act="editValidation">New code</button><button class="btn pri" data-act="editTenant">Add tenant</button></div>
+  ${repPanel}
   <section class="panel"><div class="panel-h"><h2>Tenants</h2><span class="muted" style="font-size:.84rem">Select a tenant to see its valet report</span></div>
   ${ts.length?`<div class="tbl-wrap"><table><thead><tr><th>Tenant</th><th>Codes</th><th class="r">Allotment</th><th class="r">On site now</th><th class="r">Peak today</th><th class="r">Overage spaces, 30d</th><th class="r">Overage, 30d</th><th></th></tr></thead><tbody>${ts.map(tRow).join('')}</tbody></table></div>`:'<div class="empty">No tenants yet. Add one to issue its validation code and track its space allotment.</div>'}</section>
   ${report}
   <section class="panel"><div class="panel-h"><h2>All validation codes</h2></div>
   ${vals.length?`<div class="tbl-wrap"><table><thead><tr><th>Code</th><th>Tenant or department</th><th>Covers</th><th>Valid at</th><th class="r">Used</th><th>Can be used</th><th></th></tr></thead><tbody>${vals.map(v=>{const off=!v.active||(v.expiresAt&&v.expiresAt<now())||(v.validFrom&&v.validFrom>now())||(+v.maxUses&&v.uses>=v.maxUses);const tn=v.tenantId&&byId('tenants',v.tenantId);
-    return `<tr><td class="mono"><b>${esc(v.code)}</b>${v.name?`<span class="sub">${esc(v.name)}</span>`:''}</td><td>${esc(tn?tn.name:v.department)}</td><td>${esc(benefit(v))}</td><td>${esc(vfacs(v))}</td><td class="r num">${v.uses||0}${+v.maxUses?' / '+v.maxUses:''}</td><td class="num">${v.validFrom?fmtDate(v.validFrom)+' – ':''}${v.expiresAt?fmtDate(v.expiresAt):'no end date'} ${off?'<span class="pill">Inactive</span>':'<span class="pill ok">Active</span>'}</td><td><div class="acts"><button class="btn sm" data-act="editValidation" data-id="${v.id}">Edit</button><button class="btn sm" data-act="toggleValidation" data-id="${v.id}">${v.active?'Turn off':'Turn on'}</button></div></td></tr>`}).join('')}</tbody></table></div>`:'<div class="empty">No validation codes yet.</div>'}</section>
+    return `<tr><td class="mono"><b>${esc(v.code)}</b>${v.name?`<span class="sub">${esc(v.name)}</span>`:''}</td><td>${esc(tn?tn.name:v.department)}</td><td>${esc(benefit(v))}${v.eventNights?'<span class="sub">Works on event nights</span>':''}</td><td>${esc(vfacs(v))}</td><td class="r num">${v.uses||0}${+v.maxUses?' / '+v.maxUses:''}</td><td class="num">${v.validFrom?fmtDate(v.validFrom)+' – ':''}${v.expiresAt?fmtDate(v.expiresAt):'no end date'} ${off?'<span class="pill">Inactive</span>':'<span class="pill ok">Active</span>'}</td><td><div class="acts"><button class="btn sm" data-act="editValidation" data-id="${v.id}">Edit</button><button class="btn sm" data-act="toggleValidation" data-id="${v.id}">${v.active?'Turn off':'Turn on'}</button></div></td></tr>`}).join('')}</tbody></table></div>`:'<div class="empty">No validation codes yet.</div>'}</section>
   ${window.vCodeOccupancy?window.vCodeOccupancy():''}`;
 }
 function tenantForm(t){
@@ -371,14 +383,14 @@ function tenantForm(t){
     {id:'allotment',label:'Space allotment',type:'number',value:t.allotment??'',help:'Cars allowed at once. Leave blank if not limited.'},
     {id:'overageRate',label:'Overage charge ($ per space per day)',type:'number',step:'0.01',value:t.overageRate??''},
     {id:'contact',label:'Billing contact email',type:'email',value:t.contact},
-    ...(isNew?[{id:'code',label:'Validation code',value:uid('').slice(0,6),help:'Staff or valet enter this to validate a stay.'},{id:'hours',label:'Free hours per validation',type:'number',step:'0.25',value:2.5}]:[]),
+    ...(isNew?[{id:'code',label:'Validation code',value:uid('').slice(0,6),help:'Staff or valet enter this to validate a stay.'},{id:'hours',label:'Free hours per validation',type:'number',step:'0.25',value:2.5,help:'Use 24 for all day.'},{id:'eventNights',label:'Works on event nights',type:'select',options:[['0','No'],['1','Yes: free time, then regular rates']],value:'0'}]:[]),
   ],extra:isNew?'':`<button type="button" class="btn danger" data-dlg="delete">Delete tenant</button>`,
   onExtra:()=>write(db=>col(db,'tenants').doc(t.id).delete(),'Tenant deleted'),
   onSubmit:async v=>{const data={name:v.name.trim(),facilityId:v.facilityId,allotment:v.allotment===''?0:+v.allotment,overageRate:+v.overageRate||0,contact:v.contact.trim()};
     if(!isNew)return write(db=>col(db,'tenants').doc(t.id).update(data),'Tenant saved');
     const code=normPlate(v.code);if(code&&S.validations.some(x=>x.code===code))return 'That validation code is already in use.';
     const id=R.uid('t');const ok=await addDoc('tenants',Object.assign(data,{createdAt:now()}),id);
-    if(ok&&code)await addDoc('validations',{code,name:data.name+' validation',tenantId:id,department:data.name,type:'hours',value:+v.hours||2.5,maxUses:0,uses:0,active:true,validFrom:null,expiresAt:null,facilityIds:[],createdAt:now()});
+    if(ok&&code)await addDoc('validations',{code,name:data.name+' validation',tenantId:id,department:data.name,type:'hours',value:+v.hours||2.5,eventNights:v.eventNights==='1',maxUses:0,uses:0,active:true,validFrom:null,expiresAt:null,facilityIds:[],createdAt:now()});
     if(ok){UI.tenant=id;toast(`${data.name} added${code?' with code '+code:''}`)}return ok}});
 }
 const VAL_TYPES=[['hours','Free time (hours from arrival)'],['percent','Percent off'],['dollar','Dollars off'],['fixed','Fixed final price'],['full','Covers the full stay']];
@@ -395,6 +407,7 @@ function validationForm(v){
     {id:'validFrom',label:'Can be used from',type:'date',value:dIso(v.validFrom)},
     {id:'expiresAt',label:'Can be used until',type:'date',value:dIso(v.expiresAt),help:'When the code stops working. Separate from how much parking it covers.'},
     {id:'facilityIds',label:'Valid at',type:'checks',options:S.facilities.map(f=>[f.id,f.name]),value:v.facilityIds||[],help:'Select none for the tenant’s garage (or everywhere).'},
+    {id:'eventNights',label:'Works on event nights',type:'select',options:[['0','No: refused on event nights'],['1','Yes: free time, then regular rates']],value:v.eventNights?'1':'0',help:'Event nights are specials with event dates under Locations → Rates & specials.'},
     ...(isNew?[]:[{id:'active',label:'Status',type:'select',options:[['1','On'],['0','Off']],value:v.active===false?'0':'1'}]),
   ],extra:isNew?'':`<button type="button" class="btn danger" data-dlg="delete">Delete code</button>`,
   onExtra:()=>write(db=>col(db,'validations').doc(v.id).delete(),'Code deleted'),
@@ -403,7 +416,7 @@ function validationForm(v){
     const val=+x.value||0;if(x.type!=='full'&&!(val>0))return 'Enter how much the code covers.';if(x.type==='percent'&&val>100)return 'Percent can’t be over 100.';
     const validFrom=x.validFrom?new Date(x.validFrom+'T00:00:00').getTime():null,expiresAt=x.expiresAt?new Date(x.expiresAt+'T23:59:00').getTime():null;
     if(validFrom&&expiresAt&&validFrom>expiresAt)return 'The end date is before the start date.';
-    const data={code,name:x.name.trim(),tenantId:t?t.id:null,department:t?t.name:x.department.trim(),type:x.type,value:x.type==='full'?0:val,maxUses:+x.maxUses||0,validFrom,expiresAt,facilityIds:x.facilityIds};
+    const data={code,name:x.name.trim(),tenantId:t?t.id:null,department:t?t.name:x.department.trim(),type:x.type,value:x.type==='full'?0:val,maxUses:+x.maxUses||0,validFrom,expiresAt,facilityIds:x.facilityIds,eventNights:x.eventNights==='1'};
     if(!isNew){data.active=x.active==='1';return write(db=>col(db,'validations').doc(v.id).update(data),'Code saved')}
     return addDoc('validations',Object.assign(data,{uses:0,active:true,createdAt:now()})).then(ok=>{if(ok)toast('Validation code '+code+' created');return ok})}});
 }
@@ -432,6 +445,8 @@ function facilityForm(f){
       {id:'name',label:'Name',value:f.name,required:true},
       {id:'type',label:'Type',type:'select',options:[['garage','Garage'],['lot','Surface lot']],value:f.type||'garage'},
       {id:'payMode',label:'How drivers pay',type:'select',options:[['lpr','LPR cameras at entry and exit (pay on exit, autopay)'],['qr','QR code / text-to-pay signs (pay by plate, no cameras)']],value:f.payMode||(f.type==='lot'?'qr':'lpr')},
+      {id:'onlinePrepay',label:'Paying ahead online',type:'select',options:[['1','Drivers can prepay on the driver page'],['0','No prepay: charged for the whole visit when they leave']],value:f.onlinePrepay===false?'0':'1',help:'Pay-on-exit garages hide from the “Pay to park” list.'},
+      {id:'payButtons',label:'Pay buttons on the driver page',type:'select',options:[['standard','Hours, then All day'],['cap','Hours until the daily max, then one “N+ hrs” button (rest of the day)'],['allday','One “All day” price (flat-rate lots)']],value:f.payButtons||'standard'},
       {id:'lotCode',label:'Lot number on signs',value:f.lotCode||'',help:'Short number drivers scan or text, like 4201. Used by QR lots.'},
       {id:'address',label:'Location note',value:f.address},
       {id:'capacity',label:'Total spaces',type:'number',value:f.capacity,required:true},
@@ -463,7 +478,7 @@ function facilityForm(f){
       if(v.payMode==='qr'&&!lotCode)return 'Give the lot a number for its signs.';
       if(lotCode&&S.facilities.some(x=>x.id!==f.id&&String(x.lotCode||'').toUpperCase()===lotCode))return 'Another facility already uses that lot number.';
       const rates=Object.assign({},r,{mode:v.mode,incrementMin:+v.incrementMin||60,incrementPrice:+v.incrementPrice||0,table,dailyMax:+v.dailyMax||0,graceMin:+v.graceMin||0,resetTime:v.resetTime,rolling:v.dayMode==='rolling',specials:r.specials||[]});delete rates.hourly;
-      const data={name:v.name.trim(),type:v.type,payMode:v.payMode,lotCode,address:v.address.trim(),capacity:+v.capacity||0,baseline:+v.baseline||0,timeZone:v.timeZone,reservedSpaces:Math.max(0,Math.round(+v.reservedSpaces||0)),reservationPremium:Math.max(0,+v.reservationPremium||0),reservationGraceMin:Math.max(0,+v.reservationGraceMin||60),cancelHours:Math.max(0,+v.cancelHours||0),valetRate:v.valetRate===''?0:Math.max(0,+v.valetRate||0),active:v.active!=='0',rates};
+      const data={name:v.name.trim(),type:v.type,payMode:v.payMode,onlinePrepay:v.onlinePrepay!=='0',payButtons:['cap','allday'].includes(v.payButtons)?v.payButtons:'standard',lotCode,address:v.address.trim(),capacity:+v.capacity||0,baseline:+v.baseline||0,timeZone:v.timeZone,reservedSpaces:Math.max(0,Math.round(+v.reservedSpaces||0)),reservationPremium:Math.max(0,+v.reservationPremium||0),reservationGraceMin:Math.max(0,+v.reservationGraceMin||60),cancelHours:Math.max(0,+v.cancelHours||0),valetRate:v.valetRate===''?0:Math.max(0,+v.valetRate||0),active:v.active!=='0',rates};
       if(HOSTED)data.terminalDeviceId=String(v.terminalDeviceId||'').trim();
       return f.id?write(db=>col(db,'facilities').doc(f.id).update(data),'Facility saved'):addDoc('facilities',Object.assign(data,{createdAt:now()}),R.uid('f'))}
   });
@@ -475,18 +490,18 @@ function ratesForm(f){
     <div class="form-grid"><div class="field"><label for="spn${i}">Name</label><input id="spn${i}" value="${esc(x.name||'')}" placeholder="Early bird"></div><div class="field"><label for="spp${i}">Flat price ($)</label><input id="spp${i}" type="number" step="0.25" value="${esc(x.price??'')}"></div>
     <div class="field"><label for="spf${i}">Enter from</label><input id="spf${i}" type="time" value="${esc(x.enterFrom||'05:00')}"></div><div class="field"><label for="spu${i}">Enter by</label><input id="spu${i}" type="time" value="${esc(x.enterUntil||'09:00')}"></div>
     <div class="field"><label for="spx${i}">Leave by (optional)</label><input id="spx${i}" type="time" value="${esc(x.exitBy||'')}"></div><div class="field"><label for="spa${i}">Leave after (optional)</label><input id="spa${i}" type="time" value="${esc(x.exitAfter||'')}"></div>
-    <div class="field"><label for="spd${i}">Only on dates (optional)</label><input id="spd${i}" value="${esc((x.dates||[]).join(', '))}" placeholder="2026-12-31, 2027-01-01"><div class="help">For events. Leave blank to use the days below.</div></div>
+    <div class="field"><label for="spd${i}">Only on dates (optional)</label><input id="spd${i}" value="${esc((x.dates||[]).join(', '))}" placeholder="2026-12-31, 2027-01-01"><div class="help">For events. Leave blank to use the days below. Add one event special per night when start times differ.</div></div>
     <div class="field"><label for="spm${i}">Minimum stay (minutes)</label><input id="spm${i}" type="number" value="${esc(x.minStayMin||'')}"></div></div>
     <div class="checks" id="spw${i}">${DAYS.map((d,k)=>`<label><input type="checkbox" value="${k}" ${(x.days||[1,2,3,4,5]).map(Number).includes(k)?'checked':''}>${d}</label>`).join('')}</div>
-    <div class="checks"><label><input type="checkbox" id="spn2${i}" ${x.exitNextDay?'checked':''}>Leave-by time is the next day (overnight)</label><label><input type="checkbox" id="sph${i}" ${x.noHolidays===false?'':'checked'}>Not on holidays</label><label><input type="checkbox" id="spo${i}" ${x.active===false?'':'checked'}>Active</label><button type="button" class="btn sm danger" data-sp-rm="${i}">Remove</button></div></div>`;
-  const body=()=>`<p class="muted" style="margin:0 0 10px;font-size:.9rem">Current rates: ${esc(R.rateSummary(Object.assign({},f,{rates:Object.assign({},r,{specials:[]})})).join(' · '))}. A special applies when the whole stay fits its rules; the driver pays whichever is lower.</p>
+    <div class="checks"><label><input type="checkbox" id="spn2${i}" ${x.exitNextDay?'checked':''}>Leave-by time is the next day (overnight)</label><label><input type="checkbox" id="spfl${i}" ${x.flat?'checked':''}>Charge exactly this price, even for a short stay (event entrance rate)</label><label><input type="checkbox" id="sph${i}" ${x.noHolidays===false?'':'checked'}>Not on holidays</label><label><input type="checkbox" id="spo${i}" ${x.active===false?'':'checked'}>Active</label><button type="button" class="btn sm danger" data-sp-rm="${i}">Remove</button></div></div>`;
+  const body=()=>`<p class="muted" style="margin:0 0 10px;font-size:.9rem">Current rates: ${esc(R.rateSummary(Object.assign({},f,{rates:Object.assign({},r,{specials:[]})})).join(' · '))}. A special applies when the whole stay fits its rules; the driver pays whichever is lower, unless the special charges exactly its price (event nights). On event nights only validation codes marked for event nights work, and those stays pay regular rates after their free time.</p>
     <div id="specRows" style="display:grid;gap:10px">${rows.map(row).join('')||'<p class="note">No specials yet.</p>'}</div>
     <div class="row" style="margin-top:10px"><button type="button" class="btn sm" data-sp-add="eb">+ Early bird</button><button type="button" class="btn sm" data-sp-add="ev">+ Evening</button><button type="button" class="btn sm" data-sp-add="wk">+ Weekend</button><button type="button" class="btn sm" data-sp-add="event">+ Event</button></div>
     <div class="field" style="margin-top:12px"><label for="spHol">Holidays (no specials unless an event date), all facilities</label><input id="spHol" value="${esc(hol.join(', '))}" placeholder="2026-11-26, 2026-12-25"></div>`;
   const read=()=>[...dlgForm.querySelectorAll('.spec')].map(el=>{const i=el.dataset.i,g=k=>$('#'+k+i,dlgForm);const dates=g('spd').value.split(',').map(x=>x.trim()).filter(x=>/^\d{4}-\d{2}-\d{2}$/.test(x));
-    return {id:rows[i]&&rows[i].id||R.uid('sp'),name:g('spn').value.trim()||'Special',price:+g('spp').value,enterFrom:g('spf').value||'00:00',enterUntil:g('spu').value||'23:59',exitBy:g('spx').value||'',exitAfter:g('spa').value||'',exitNextDay:g('spn2').checked,dates,minStayMin:+g('spm').value||0,
+    return {id:rows[i]&&rows[i].id||R.uid('sp'),name:g('spn').value.trim()||'Special',price:+g('spp').value,enterFrom:g('spf').value||'00:00',enterUntil:g('spu').value||'23:59',exitBy:g('spx').value||'',exitAfter:g('spa').value||'',exitNextDay:g('spn2').checked,flat:g('spfl').checked,dates,minStayMin:+g('spm').value||0,
       days:[...g('spw').querySelectorAll('input:checked')].map(c=>+c.value),noHolidays:g('sph').checked,active:g('spo').checked}});
-  const PRESET={eb:{name:'Early bird',price:12,enterFrom:'05:00',enterUntil:'09:00',exitBy:'19:00',days:[1,2,3,4,5]},ev:{name:'Evening',price:8,enterFrom:'16:00',enterUntil:'02:00',exitBy:'06:00',exitNextDay:true,days:[0,1,2,3,4,5,6]},wk:{name:'Weekend day',price:10,enterFrom:'00:00',enterUntil:'23:59',days:[0,6]},event:{name:'Event',price:20,enterFrom:'15:00',enterUntil:'22:00',dates:[],days:[]}};
+  const PRESET={eb:{name:'Early bird',price:12,enterFrom:'05:00',enterUntil:'09:00',exitBy:'19:00',days:[1,2,3,4,5]},ev:{name:'Evening',price:8,enterFrom:'16:00',enterUntil:'02:00',exitBy:'06:00',exitNextDay:true,days:[0,1,2,3,4,5,6]},wk:{name:'Weekend day',price:10,enterFrom:'00:00',enterUntil:'23:59',days:[0,6]},event:{name:'Event',price:25,enterFrom:'17:00',enterUntil:'23:59',exitBy:r.resetTime||'03:00',exitNextDay:true,flat:true,dates:[],days:[]}};
   const redraw=()=>{rows=read();$('#specRows',dlgForm).innerHTML=rows.map(row).join('')||'<p class="note">No specials yet.</p>'};
   openForm({title:'Rates & specials: '+f.name,submit:'Save specials',body:body(),onSubmit:async()=>{
     const sp=read();const bad=sp.find(x=>!(x.price>=0)||isNaN(x.price));if(bad)return `Give “${bad.name}” a price.`;
@@ -512,6 +527,7 @@ const mStatus=p=>p.status==='active'&&p.endAt&&p.endAt<now()?'ended':p.status;
 const permitPill=p=>{const st=mStatus(p);const [c,l]=MSTATUS[st]||['',st];return `<span class="pill ${c}">${l}${st==='active'&&p.endAt?' · ends '+fmtDate(p.endAt-1):''}</span>`};
 const billingLabel=p=>p.companyId?'Company: '+((byId('companies',p.companyId)||{}).name||p.companyName||''):p.billing==='office'?'Billed by the office':p.accountId?'Card on file (driver account)':'Not linked to billing';
 function vPermits(){
+  if(UI.acct&&byId('companies',UI.acct))return vAccount(byId('companies',UI.acct));
   const q=UI.permitQ.trim().toLowerCase();const qp=normPlate(q);
   let rows=S.permits.filter(p=>{const st=mStatus(p);if(UI.permitStatus==='pastdue'){if(!(p.pastDueSince||st==='suspended'))return false}else if(UI.permitStatus!=='all'&&st!==UI.permitStatus)return false;
     if(!q)return true;return (p.holder||'').toLowerCase().includes(q)||(p.email||'').toLowerCase().includes(q)||(p.companyName||'').toLowerCase().includes(q)||String(p.number).toLowerCase().includes(q)||(qp&&(p.plates||[]).some(x=>normPlate(x).includes(qp)))});
@@ -521,12 +537,14 @@ function vPermits(){
   const active=S.permits.filter(p=>p.status==='active'&&(!p.endAt||p.endAt>now()));
   const mrr=sum(active,p=>{const t=typeById(p.permitTypeId);return t?+t.price:0});
   const tz=(S.config&&S.config.timeZone)||'America/Chicago';
-  return `<div class="pagehead"><div><h1>Monthly parking</h1><p>Plans, monthly parkers and company accounts. Cards are billed on the 1st; companies can pay by card or Square invoice.</p></div><button class="btn" data-act="importMonthly">Import CSV</button><button class="btn" data-act="editType">New plan</button><button class="btn pri" data-act="issuePermit">Add monthly parker</button></div>
+  const pk=UI.permitStatus+'|'+q;if(UI.permitKey!==pk){UI.permitKey=pk;UI.permitPage=0}
+  const PAGE=100,pages=Math.max(1,Math.ceil(rows.length/PAGE));UI.permitPage=Math.min(UI.permitPage||0,pages-1);const total=rows.length;rows=rows.slice(UI.permitPage*PAGE,(UI.permitPage+1)*PAGE);
+  return `<div class="pagehead"><div><h1>Monthly parking</h1><p>Plans, monthly parkers and accounts for companies, buildings and garages. Cards are billed on the 1st; accounts can pay by card or Square invoice.</p></div><button class="btn" data-act="importMonthly">Import CSV</button><button class="btn" data-act="editType">New plan</button><button class="btn pri" data-act="issuePermit">Add monthly parker</button></div>
   <div class="kpis"><div class="kpi"><small>Active monthly parkers</small><b>${active.length}</b><span>${S.companies.length} compan${S.companies.length===1?'y':'ies'}</span></div><div class="kpi"><small>Monthly recurring</small><b>${money0(mrr)}</b><span>Before tax</span></div>
     <div class="kpi ${cnt('pastdue')?'alert':''}"><small>Past due or suspended</small><b>${cnt('pastdue')}</b><span>${S.permits.filter(p=>p.status==='suspended').length} suspended</span></div><div class="kpi"><small>Waitlist</small><b>${cnt('waitlist')}</b><span>Approve when a spot opens</span></div></div>
   <section class="panel"><div class="panel-h"><h2>Plans</h2><span class="muted" style="font-size:.84rem">Sold includes waitlisted-then-approved and suspended parkers</span></div>
   <div class="panel-b"><div class="facs">${S.permitTypes.length?[...S.permitTypes].sort((a,b)=>a.name.localeCompare(b.name)).map(t=>{const sold=R.soldOf(t),q=+t.quota||0,p=q?sold/q:0;const fs=(t.facilities||[]).map(facById).filter(Boolean);
-    return `<button class="fac" data-act="editType" data-id="${t.id}"><div class="fac-top"><div><h3>${esc(t.name)}</h3><span class="tag">${t.kind==='reserved'?'Reserved space':'Unreserved'}</span> ${t.active===false?'<span class="tag">Not for sale</span>':''}</div><div class="pct" style="font-size:1.2rem">${money0(t.price)}<span class="muted" style="font-size:.8rem">/mo</span></div></div>
+    return `<button class="fac" data-act="editType" data-id="${t.id}"><div class="fac-top"><div><h3>${esc(t.name)}</h3><span class="tag">${t.kind==='reserved'?'Reserved space':'Unreserved'}</span> ${t.active===false?'<span class="tag">Not for sale</span>':''}</div><div class="pct" style="font-size:1.2rem">${moneyP(t.price)}<span class="muted" style="font-size:.8rem">/mo</span></div></div>
     <div class="bar ${p>=1?'bad':p>=.85?'warn':''}"><i style="width:${Math.min(100,p*100)}%"></i></div>
     <div class="fac-meta num"><span>${sold} / ${q||'∞'} sold</span><span>Up to ${t.maxVehicles||3} vehicles</span></div>
     <div class="muted" style="font-size:.8rem">${fs.length?fs.map(f=>esc(f.name)).join(', '):'All facilities'}</div></button>`}).join(''):'<div class="muted">No monthly plans yet.</div>'}</div></div></section>
@@ -540,37 +558,79 @@ function vPermits(){
     ${st==='suspended'?`<button class="btn sm" data-act="reinstatePermit" data-id="${p.id}">Reinstate</button>`:''}
     ${p.billing==='office'&&(st==='active'||st==='suspended')?`<button class="btn sm ok" data-act="officePaid" data-id="${p.id}">Record payment</button>`:''}
     ${st==='active'&&!p.endAt?`<button class="btn sm" data-act="endMonthly" data-id="${p.id}">Cancel</button>`:''}
-    <button class="btn sm" data-act="editPermit" data-id="${p.id}">Edit</button></div></td></tr>`}).join('')}</tbody></table></div>`:'<div class="empty">No monthly parkers match.</div>'}</section>
+    <button class="btn sm" data-act="editPermit" data-id="${p.id}">Edit</button></div></td></tr>`}).join('')}</tbody></table></div>${pager('permitPage',UI.permitPage,PAGE,total)}`:'<div class="empty">No monthly parkers match.</div>'}</section>
   ${vCompanies()}`;
 }
+/* A small pager for long tables: "1–100 of 4,812", earlier and later. key is the UI field that holds the page number. */
+function pager(key,page,size,total){
+  if(total<=size)return '';const from=page*size+1,to=Math.min(total,(page+1)*size);
+  return `<div class="panel-b row" style="align-items:center;gap:8px"><span class="muted" style="font-size:.84rem">${from.toLocaleString()}–${to.toLocaleString()} of ${total.toLocaleString()}</span><button class="btn sm" data-act="pagePrev" data-k="${key}" ${page<=0?'disabled':''}>‹ Earlier</button><button class="btn sm" data-act="pageNext" data-k="${key}" ${to>=total?'disabled':''}>Later ›</button></div>`;
+}
+const CO_HOLD=['active','suspended','approved','pending'];
+const holdsSpace=p=>CO_HOLD.includes(p.status)&&(!p.endAt||p.endAt>now());
 function vCompanies(){
   const cs=[...S.companies].sort((a,b)=>a.name.localeCompare(b.name));
   const invs=[...S.invoices].sort((a,b)=>(b.createdAt||0)-(a.createdAt||0)).slice(0,40);
   const ipill=st=>`<span class="pill ${({PAID:'ok',UNPAID:'warn',SCHEDULED:'info',PARTIALLY_PAID:'warn',CANCELED:'',FAILED:'bad'})[st]||''}">${esc(String(st||'').replace('_',' ').toLowerCase())}</span>`;
-  return `<section class="panel"><div class="panel-h"><h2>Companies</h2><div class="row">${HOSTED&&canEditOps()?'<button class="btn sm" data-act="runBilling">Run billing now</button>':''}<button class="btn sm pri" data-act="editCompany">Add company</button></div></div>
-  ${cs.length?`<div class="tbl-wrap"><table><thead><tr><th>Company</th><th>Contact</th><th>Billing</th><th class="r">Parkers</th><th class="r">Monthly</th><th></th></tr></thead><tbody>${cs.map(c=>{const ps=S.permits.filter(p=>p.companyId===c.id&&['active','suspended'].includes(p.status)&&(!p.endAt||p.endAt>now()));
-    return `<tr><td><b>${esc(c.name)}</b></td><td>${esc(c.contactName||'')}<span class="sub">${esc(c.email||'')}${c.phone?' · '+esc(c.phone):''}</span></td><td>${c.billing==='invoice'?'Square invoice':'Company card'}${c.billing==='card'?`<span class="sub">${c.card?esc(c.card.brand||'Card')+' ending '+esc(c.card.last4):'No card yet'}</span>`:`<span class="sub">Due ${(S.config&&S.config.invoiceDueDays)||5} days after the 1st</span>`}</td>
-    <td class="r num">${ps.length}</td><td class="r num">${money(sum(ps,p=>(typeById(p.permitTypeId)||{}).price))}</td>
-    <td><div class="acts">${HOSTED&&c.portalToken?`<button class="btn sm" data-act="copy" data-v="${esc(HOSTED.webhookBase+'/?company='+c.portalToken)}">Copy portal link</button><button class="btn sm" data-act="sendCompanyLink" data-id="${c.id}">Email link</button>`:''}<button class="btn sm" data-act="editCompany" data-id="${c.id}">Edit</button></div></td></tr>`}).join('')}</tbody></table></div>`:'<div class="empty">No companies yet. Add downtown employers that pay for their employees’ parking; they get a private link to add and remove employees.</div>'}</section>
+  const used={},waiting={},monthly={};S.permits.forEach(p=>{if(!p.companyId)return;if(holdsSpace(p)){used[p.companyId]=(used[p.companyId]||0)+1;if(['active','suspended'].includes(p.status))monthly[p.companyId]=(monthly[p.companyId]||0)+(+(typeById(p.permitTypeId)||{}).price||0)}else if(p.status==='waitlist')waiting[p.companyId]=(waiting[p.companyId]||0)+1});
+  const q=(UI.coQ||'').trim().toLowerCase(),shown=q?cs.filter(c=>(c.name||'').toLowerCase().includes(q)||(c.contactName||'').toLowerCase().includes(q)||(c.email||'').toLowerCase().includes(q)):cs;
+  const pg=Math.min(UI.coPage||0,Math.max(0,Math.ceil(shown.length/50)-1));
+  return `<section class="panel"><div class="panel-h"><h2>Accounts</h2><div class="row">${cs.length>8?`<input id="coQ" type="search" placeholder="Find an account" value="${esc(UI.coQ||'')}" data-fresh="1" style="width:200px">`:''}${HOSTED&&canEditOps()?'<button class="btn sm" data-act="runBilling">Run billing now</button>':''}<button class="btn sm pri" data-act="editCompany">Add account</button></div></div>
+  ${cs.length?`<div class="tbl-wrap"><table><thead><tr><th>Account</th><th>Location</th><th>Contact</th><th>Billing</th><th class="r">Parkers</th><th class="r">Monthly</th><th></th></tr></thead><tbody>${shown.slice(pg*50,pg*50+50).map(c=>{const n=used[c.id]||0,max=+c.maxParkers||0,fs=(c.facilityIds||[]).map(facById).filter(Boolean);
+    return `<tr><td><a href="#" data-act="openAccount" data-id="${c.id}"><b>${esc(c.name)}</b></a>${waiting[c.id]?`<span class="sub">${waiting[c.id]} on the waitlist</span>`:''}</td><td>${fs.length?fs.map(f=>esc(f.name)).join(', '):'<span class="muted">Any</span>'}</td><td>${esc(c.contactName||'')}<span class="sub">${esc(c.email||'')}${c.phone?' · '+esc(c.phone):''}</span></td><td>${c.billing==='invoice'?'Square invoice':'Company card'}${c.billing==='card'?`<span class="sub">${c.card?esc(c.card.brand||'Card')+' ending '+esc(c.card.last4):'No card yet'}</span>`:`<span class="sub">Due ${(S.config&&S.config.invoiceDueDays)||5} days after the 1st</span>`}</td>
+    <td class="r num">${n.toLocaleString()}${max?` / ${max.toLocaleString()}`:''}${max&&n>=max?'<span class="sub" style="color:var(--bad)">Full</span>':''}</td><td class="r num">${money(monthly[c.id]||0)}</td>
+    <td><div class="acts"><button class="btn sm pri" data-act="openAccount" data-id="${c.id}">Open</button><button class="btn sm" data-act="editCompany" data-id="${c.id}">Edit</button></div></td></tr>`}).join('')}</tbody></table></div>${pager('coPage',pg,50,shown.length)}`:'<div class="empty">No accounts yet. Add a company, building or garage that parks a group of people. You add their parkers here, or send them a private link so they add and remove their own.</div>'}</section>
   ${invs.length?`<section class="panel"><div class="panel-h"><h2>Company invoices</h2><span class="muted" style="font-size:.84rem">Sent through Square on the 1st. Past-due invoices suspend that company’s parkers after ${(S.config&&S.config.monthlyGraceDays)||5} days.</span></div>
   <div class="tbl-wrap"><table><thead><tr><th>Company</th><th>Month</th><th class="r">Amount</th><th>Due</th><th>Status</th><th></th></tr></thead><tbody>${invs.map(i=>`<tr><td>${esc(i.companyName||'')}</td><td class="num">${esc(i.period)}</td><td class="r num">${money(i.amount)}${i.tax?`<span class="sub">incl. ${money(i.tax)} tax</span>`:''}</td><td class="num">${esc(i.dueDate||'')}</td><td>${ipill(i.status)}${i.suspended?'<span class="sub">Parkers suspended</span>':''}</td>
     <td><div class="acts">${i.publicUrl?`<a class="btn sm" href="${esc(i.publicUrl)}" target="_blank" rel="noopener">Open</a>`:''}${i.status!=='PAID'&&HOSTED?`<button class="btn sm ok" data-act="invoicePaid" data-id="${i.id}">Mark paid</button>`:''}</div></td></tr>`).join('')}</tbody></table></div></section>`:''}`;
 }
+
+/* One account: its limit, its parkers, and everything you do to them. */
+function vAccount(c){
+  const q=(UI.acctQ||'').trim().toLowerCase(),qp=normPlate(q),flt=UI.acctFilter||'current',tz=(S.config&&S.config.timeZone)||'America/Chicago';
+  const all=S.permits.filter(p=>p.companyId===c.id),cur=all.filter(holdsSpace),wait=all.filter(p=>p.status==='waitlist'),gone=all.filter(p=>!holdsSpace(p)&&p.status!=='waitlist');
+  let rows=flt==='waitlist'?wait:flt==='ended'?gone:cur;
+  if(q)rows=rows.filter(p=>(p.holder||'').toLowerCase().includes(q)||(p.email||'').toLowerCase().includes(q)||String(p.number).toLowerCase().includes(q)||(qp&&(p.plates||[]).some(x=>normPlate(x).includes(qp))));
+  rows=rows.slice().sort((a,b)=>(a.holder||'').localeCompare(b.holder||''));
+  const key=c.id+'|'+flt+'|'+q;if(UI.acctKey!==key){UI.acctKey=key;UI.acctPage=0}
+  const PAGE=100,pg=Math.min(UI.acctPage||0,Math.max(0,Math.ceil(rows.length/PAGE)-1)),total=rows.length;rows=rows.slice(pg*PAGE,pg*PAGE+PAGE);
+  const max=+c.maxParkers||0,used=cur.length,left=max?Math.max(0,max-used):null,pct=max?Math.min(100,used/max*100):0;
+  const monthly=sum(cur.filter(p=>['active','suspended'].includes(p.status)),p=>+(typeById(p.permitTypeId)||{}).price||0);
+  const fs=(c.facilityIds||[]).map(facById).filter(Boolean),plans=(c.planIds||[]).map(id=>typeById(id)).filter(Boolean);
+  const seg=(k,l,n)=>`<button data-act="acctFilter" data-v="${k}" aria-pressed="${flt===k}">${l} <span class="muted">${n.toLocaleString()}</span></button>`;
+  return `<div class="pagehead"><div><button class="btn sm" data-act="closeAccount">‹ All monthly parking</button><h1 style="margin-top:10px">${esc(c.name)}</h1><p>${[c.contactName,c.email,c.phone].filter(Boolean).map(esc).join(' · ')||'No contact yet'} · ${c.billing==='invoice'?'Square invoice each month':'Card on file, charged on the 1st'}${fs.length?' · '+fs.map(f=>esc(f.name)).join(', '):''}</p></div>
+    <div class="row"><button class="btn" data-act="editCompany" data-id="${c.id}">Edit account</button>${HOSTED&&c.portalToken?`<button class="btn" data-act="copy" data-v="${esc(HOSTED.webhookBase+'/?company='+c.portalToken)}">Copy their link</button><button class="btn" data-act="sendCompanyLink" data-id="${c.id}">Email their link</button>`:''}<button class="btn" data-act="acctExport" data-id="${c.id}" data-perm="export">Export (CSV)</button><button class="btn" data-act="acctBulk" data-id="${c.id}">Add many</button><button class="btn pri" data-act="acctAdd" data-id="${c.id}">Add a parker</button></div></div>
+  <div class="kpis"><div class="kpi ${max&&used>=max?'alert':''}"><small>Parkers</small><b>${used.toLocaleString()}${max?` <span style="font-size:1rem;font-weight:500" class="muted">of ${max.toLocaleString()}</span>`:''}</b><span>${max?(left?`${left.toLocaleString()} space${left===1?'':'s'} left`:'Full: raise the limit to add more'):'No limit set'}</span></div>
+    <div class="kpi"><small>Monthly</small><b>${money0(monthly)}</b><span>Before tax</span></div><div class="kpi ${wait.length?'alert':''}"><small>Waitlist</small><b>${wait.length.toLocaleString()}</b><span>${wait.length?'Plan is full: approve when a spot opens':'Nobody waiting'}</span></div>
+    <div class="kpi"><small>Plans</small><b style="font-size:1.1rem;line-height:1.3">${plans.length?plans.map(t=>esc(t.name)).join(', '):'Any plan at its location'}</b><span>${HOSTED&&c.portalToken?'Their link only shows these':'Chosen when adding'}</span></div></div>
+  ${max?`<div class="bar ${pct>=100?'bad':pct>=85?'warn':''}" style="margin:-4px 0 4px"><i style="width:${pct}%"></i></div>`:''}
+  ${c.notes?`<div class="callout"><b>Notes</b> ${esc(c.notes)}</div>`:''}
+  <section class="panel"><div class="panel-h"><h2>Parkers</h2><div class="filters"><input id="acctQ" type="search" placeholder="Search name, #, plate" value="${esc(UI.acctQ||'')}" data-fresh="1"><div class="seg">${seg('current','Current',cur.length)}${seg('waitlist','Waitlist',wait.length)}${seg('ended','Ended',gone.length)}</div></div></div>
+  ${rows.length?`<div class="tbl-wrap"><table><thead><tr><th>#</th><th>Parker</th><th>Plan</th><th>Plates</th><th>Paid through</th><th>Status</th><th></th></tr></thead><tbody>${rows.map(p=>{const t=typeById(p.permitTypeId),st=mStatus(p);
+    return `<tr><td class="mono">#${esc(p.number)}</td><td><b>${esc(p.holder)}</b><span class="sub">${esc(p.email||'')}${p.phone?' · '+esc(p.phone):''}</span></td><td>${esc(t?t.name:'Unknown plan')}<span class="sub">${t?money(t.price)+'/mo':''}</span></td><td><div class="plates">${(p.plates||[]).map(plateChip).join('')}</div></td><td class="num">${p.paidThrough?fmtDate(p.paidThrough-1,tz):'—'}${+p.prorateDue?`<span class="sub">${money(p.prorateDue)} on next bill</span>`:''}</td><td>${permitPill(p)}</td>
+    <td><div class="acts">${st==='waitlist'||st==='pending'?`<button class="btn sm ok" data-act="approvePermit" data-id="${p.id}">Approve</button>`:''}${st==='suspended'?`<button class="btn sm" data-act="reinstatePermit" data-id="${p.id}">Reinstate</button>`:''}${st==='active'&&!p.endAt?`<button class="btn sm" data-act="endMonthly" data-id="${p.id}">Remove</button>`:''}${st==='waitlist'?`<button class="btn sm" data-act="denyPermit" data-id="${p.id}">Remove</button>`:''}<button class="btn sm" data-act="editPermit" data-id="${p.id}">Edit</button></div></td></tr>`}).join('')}</tbody></table></div>${pager('acctPage',pg,PAGE,total)}`:`<div class="empty">${q?'No parkers match.':flt==='current'?'No parkers on this account yet. Add them one at a time, or paste a list.':'Nothing here.'}</div>`}</section>`;
+}
 function companyForm(c){
   c=c||{};const isNew=!c.id;
-  openForm({title:isNew?'Add company':'Edit '+c.name,submit:isNew?'Add company':'Save changes',fields:[
-    {id:'name',label:'Company name',value:c.name,required:true},
-    {id:'contactName',label:'Parking contact',value:c.contactName},
-    {id:'email',label:'Contact email (invoices and receipts)',type:'email',value:c.email,required:true},
+  openForm({title:isNew?'Add account':'Edit '+c.name,submit:isNew?'Add account':'Save changes',fields:[
+    {id:'name',label:'Account name',value:c.name,required:true,help:'A company, building or garage, e.g. “Tower One tenants”.'},
+    {id:'contactName',label:'Contact',value:c.contactName},
+    {id:'email',label:'Contact email (invoices, receipts and their link)',type:'email',value:c.email,required:true},
     {id:'phone',label:'Contact phone',type:'tel',value:c.phone},
-    {id:'billing',label:'How the company pays',type:'select',options:[['invoice','Square invoice each month (card or bank transfer)'],['card','Company card on file, charged on the 1st']],value:c.billing||'invoice'},
-  ],extra:isNew?'':`<button type="button" class="btn danger" data-dlg="delete">Delete company</button>`,
-  onExtra:async()=>{if(S.permits.some(p=>p.companyId===c.id&&['active','suspended','waitlist','approved'].includes(p.status)&&(!p.endAt||p.endAt>now()))){toast('Cancel this company’s monthly parkers first.',true);return false}return write(db=>col(db,'companies').doc(c.id).delete(),'Company deleted')},
-  onSubmit:v=>{const data={name:v.name.trim(),contactName:v.contactName.trim(),email:v.email.trim().toLowerCase(),phone:v.phone.trim(),billing:v.billing};
+    {id:'facilityIds',label:'Parks at',type:'checks',options:S.facilities.map(f=>[f.id,f.name]),value:c.facilityIds||[],help:'Only plans at these locations can be used. Select none for any location.'},
+    {id:'maxParkers',label:'Parker limit',type:'number',value:c.maxParkers||'',help:'The most monthly parkers this account can have at once. Blank for no limit. Waitlisted people don’t count.'},
+    {id:'planIds',label:'Plans they can use',type:'checks',options:S.permitTypes.map(t=>[t.id,`${t.name} · ${moneyP(t.price)}/mo`]),value:c.planIds||[],help:'Select none to allow every plan at their locations.'},
+    {id:'billing',label:'How the account pays',type:'select',options:[['invoice','Square invoice each month (card or bank transfer)'],['card','Card on file, charged on the 1st']],value:c.billing||'invoice'},
+    {id:'notes',label:'Notes (only staff see these)',value:c.notes||''},
+  ],extra:isNew?'':`<button type="button" class="btn danger" data-dlg="delete">Delete account</button>`,
+  onExtra:async()=>{if(S.permits.some(p=>p.companyId===c.id&&['active','suspended','waitlist','approved'].includes(p.status)&&(!p.endAt||p.endAt>now()))){toast('Remove this account’s monthly parkers first.',true);return false}if(UI.acct===c.id)UI.acct=null;return write(db=>col(db,'companies').doc(c.id).delete(),'Account deleted')},
+  onSubmit:v=>{const max=v.maxParkers===''?0:Math.max(0,Math.floor(+v.maxParkers||0));
+    const data={name:v.name.trim(),contactName:v.contactName.trim(),email:v.email.trim().toLowerCase(),phone:v.phone.trim(),billing:v.billing,facilityIds:v.facilityIds||[],planIds:v.planIds||[],maxParkers:max,notes:v.notes.trim()};
     if(!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(data.email))return 'Enter a valid email.';
-    if(!isNew)return write(db=>col(db,'companies').doc(c.id).update(data),'Company saved');
+    if(max&&!isNew){const n=S.permits.filter(p=>p.companyId===c.id&&holdsSpace(p)).length;if(n>max)return `This account already has ${n} parkers. Set the limit to ${n} or more, or remove some parkers first.`}
+    if(!isNew)return write(db=>col(db,'companies').doc(c.id).update(data),'Account saved');
     data.portalToken=Array.from(crypto.getRandomValues(new Uint8Array(20)),b=>b.toString(16).padStart(2,'0')).join('');data.createdAt=now();
-    return addDoc('companies',data,R.uid('co')).then(ok=>{if(ok)toast(`${data.name} added.${HOSTED?' Email them their portal link to add employees.':''}`);return ok})}});
+    return addDoc('companies',data,R.uid('co')).then(ok=>{if(ok)toast(`${data.name} added.${HOSTED?' Email them their link so they can add their own parkers.':''}`);return ok})}});
 }
 function typeForm(t){
   t=t||{};
@@ -597,16 +657,17 @@ function permitForm(p){
     fields:[
       {id:'holder',label:'Name',value:p.holder,required:true},{id:'email',label:'Email',type:'email',value:p.email},
       {id:'phone',label:'Mobile',type:'tel',value:p.phone},
-      {id:'companyId',label:'Company',type:'select',options:[['','None (individual)'],...S.companies.map(c=>[c.id,c.name])],value:p.companyId||''},
-      {id:'permitTypeId',label:'Plan',type:'select',options:S.permitTypes.map(t=>[t.id,`${t.name} · ${money0(t.price)}/mo`]),value:p.permitTypeId},
+      {id:'companyId',label:'Account',type:'select',options:[['','None (individual)'],...S.companies.map(c=>[c.id,c.name])],value:p.companyId||''},
+      {id:'permitTypeId',label:'Plan',type:'select',options:S.permitTypes.map(t=>[t.id,`${t.name} · ${moneyP(t.price)}/mo`]),value:p.permitTypeId},
       {id:'plates',label:'License plates',value:(p.plates||[]).join(', '),required:true,help:'Separated by commas.'},
-      ...(isNew?[{id:'paid',label:'This month',type:'select',options:[['bill','Add the rest of this month to the next bill (companies)'],['paid','Paid at the office']],value:'paid'}]:[]),
+      ...(isNew?[{id:'paid',label:'This month',type:'select',options:[['bill','Add the rest of this month to the next bill (companies)'],['paid','Paid at the office']],value:p._bill?'bill':'paid'}]:[]),
     ],
     onSubmit:v=>{const t=typeById(v.permitTypeId);const plates=v.plates.split(',').map(normPlate).filter(Boolean).slice(0,t.maxVehicles||3);if(!plates.length)return 'Add at least one license plate.';
       const co=v.companyId&&byId('companies',v.companyId);
+      if(co&&(isNew||p.companyId!==co.id||p.permitTypeId!==v.permitTypeId||!holdsSpace(p))){const rm=R.accountRoom(co.id,v.permitTypeId,{exclude:p.id});if(rm.error)return rm.error}
       const data={holder:v.holder.trim(),email:v.email.trim().toLowerCase(),phone:v.phone.trim(),permitTypeId:v.permitTypeId,plates,companyId:co?co.id:null,companyName:co?co.name:''};
       if(isNew){const mb=R.monthBounds(now(),facById((t.facilities||[])[0]));if(v.paid==='bill'&&!co)return 'Only company parkers can be added to a bill. Choose “Paid at the office”.';
-        Object.assign(data,{number:String(10000+Math.floor(Math.random()*89999)),status:'active',billing:co?'company':'office',createdAt:now(),startAt:now(),endAt:null,paidThrough:mb.end,source:'office'},v.paid==='bill'?{prorateDue:R.prorate(t)}:{paidAt:now(),amountPaid:R.prorate(t)})}
+        Object.assign(data,{number:R.newMonthlyNumber(),status:'active',billing:co?'company':'office',createdAt:now(),startAt:now(),endAt:null,paidThrough:mb.end,source:'office'},v.paid==='bill'?{prorateDue:R.prorate(t)}:{paidAt:now(),amountPaid:R.prorate(t)})}
       else if(!p.accountId)data.billing=co?'company':'office';
       return isNew?addDoc('permits',data,R.uid('p')).then(ok=>{if(ok)toast(`Monthly #${data.number} added`);return ok}):write(db=>col(db,'permits').doc(p.id).update(data),'Saved')}
   });
@@ -646,8 +707,9 @@ function vLpr(){
     <div class="row"><button class="btn pri" ${cams.length?'':'disabled'}>Process read</button>${UI.lprResult?`<span class="pill dot ${UI.lprResult.level==='info'?'info':UI.lprResult.level}">${esc(UI.lprResult.text)}</span>`:''}</div>
   </form></section>
   <section class="panel"><div class="panel-h"><h2>Import reads</h2></div><div class="panel-b" style="display:grid;gap:10px">
-    <p class="muted" style="margin:0;font-size:.9rem">CSV with columns <span class="mono">plate, camera, time</span>. Camera is the lane camera’s name. Time is optional. Reads are processed in time order, up to 500 at a time.</p>
-    <input type="file" id="csvFile" accept=".csv,text/csv"></div></section></div>
+    <p class="muted" style="margin:0;font-size:.9rem">Drop a camera export anywhere on this page: an Axis License Plate Verifier CSV, or any CSV with a plate, a camera and a date and time. You’ll see a preview and match the columns before anything is saved.</p>
+    <label class="dropzone" id="csvDrop" for="csvFile"><b>Drag a CSV file here</b><span class="muted">or click to choose one</span><input type="file" id="csvFile" accept=".csv,.txt,.tsv,text/csv,text/plain,text/tab-separated-values" class="sr-only"></label></div></section></div>
+  ${UI.imp?importPreview():''}
   <section class="panel"><div class="panel-h"><h2>Read log</h2><span class="muted" style="font-size:.84rem">Last ${S.feed.length} reads</span></div>${feedTable(S.feed)}</section>`;
 }
 function cameraForm(c){
@@ -665,20 +727,112 @@ function cameraForm(c){
     data.token=Array.from(crypto.getRandomValues(new Uint8Array(12)),b=>b.toString(16).padStart(2,'0')).join('');data.createdAt=now();
     return addDoc('cameras',data,R.uid('c')).then(ok=>{if(ok)toast('Camera added');return ok})}});
 }
-async function importCsv(file){
-  const text=await file.text();const lines=text.split(/\r?\n/).map(l=>l.trim()).filter(Boolean);
-  if(!lines.length){toast('That file is empty.',true);return}
-  let rows=lines.map(l=>l.split(',').map(x=>x.trim().replace(/^"|"$/g,'')));
-  if(/plate/i.test(rows[0][0]))rows=rows.slice(1);
-  const parsed=[];let bad=0;
-  rows.forEach(r=>{const [p,cam,t]=r;const c=S.cameras.find(x=>x.id===cam||x.name.toLowerCase()===String(cam||'').toLowerCase());const at=t?Date.parse(t):now();
-    if(!c||isNaN(at)){bad++;return}parsed.push({plate:p,cameraId:c.id,at})});
-  if(parsed.length>500){toast('Import up to 500 reads at a time.',true);return}
-  parsed.sort((a,b)=>a.at-b.at);toast(`Processing ${parsed.length} reads…`);
-  if(HOSTED){const r=await HOSTED.lprImport(parsed);toast(`Imported ${r.count} reads${bad?`, skipped ${bad} rows`:''}`);return}
-  for(const r of parsed)await lprRead(r);
-  toast(`Imported ${parsed.length} reads${bad?`, skipped ${bad} rows with an unknown camera or time`:''}`);
+/* ---------- camera export import (Axis License Plate Verifier and other CSVs) ----------
+   Reads the file in the browser, guesses which column holds the plate, the camera and the time, and shows a preview
+   where staff fix any guess and match each camera name in the file to a ParkOps lane. Nothing is saved until Import.
+   Reads go to the server 500 at a time, oldest first, so entries and exits pair up into visits that occupancy,
+   unpaid-exit tracking and enforcement see. Times without a time zone are read as this computer's local time. */
+function parseDelimited(text){
+  text=String(text||'').replace(/^﻿/,'');
+  const first=text.split(/\r?\n/,1)[0]||'',cnt=ch=>first.split(ch).length-1;
+  const d=[['\t',cnt('\t')],[';',cnt(';')],[',',cnt(',')]].sort((a,b)=>b[1]-a[1])[0][0];
+  const rows=[];let row=[],f='',q=false;
+  for(let i=0;i<text.length;i++){const c=text[i];
+    if(q){if(c==='"'){if(text[i+1]==='"'){f+='"';i++}else q=false}else f+=c;continue}
+    if(c==='"'&&f==='')q=true;else if(c===d){row.push(f);f=''}
+    else if(c==='\n'||c==='\r'){if(c==='\r'&&text[i+1]==='\n')i++;row.push(f);f='';if(row.some(x=>x.trim()!==''))rows.push(row);row=[]}
+    else f+=c}
+  row.push(f);if(row.some(x=>x.trim()!==''))rows.push(row);
+  return rows.map(r=>r.map(x=>x.trim()));
 }
+/* "20261005 140322123" (Axis), "2026-10-05 14:03:22", "10/5/2026 2:03 PM", or seconds/milliseconds since 1970. */
+function parseWhen(dateStr,timeStr){
+  const raw=[dateStr,timeStr].filter(x=>x!=null&&String(x).trim()!=='').join(' ').trim();if(!raw)return NaN;
+  if(/^\d{10}$/.test(raw))return +raw*1000;if(/^\d{13}$/.test(raw))return +raw;
+  let m=raw.match(/^(\d{4})(\d{2})(\d{2})[ T]?(\d{2})(\d{2})(\d{2})/);if(m)return new Date(+m[1],+m[2]-1,+m[3],+m[4],+m[5],+m[6]).getTime();
+  m=raw.match(/^(\d{4})-(\d{1,2})-(\d{1,2})[ T](\d{1,2}):(\d{2})(?::(\d{2}))?(?:[.,]\d+)?\s*(Z|[+-]\d{2}:?\d{2})?$/i);
+  if(m){if(m[7])return Date.parse(raw.replace(' ','T'));return new Date(+m[1],+m[2]-1,+m[3],+m[4],+m[5],+(m[6]||0)).getTime()}
+  const t=Date.parse(raw);return isNaN(t)?NaN:t;
+}
+function guessImportColumns(cols){
+  const find=(re,not)=>cols.findIndex(c=>re.test(c)&&!(not&&not.test(c)));
+  const plate=[/^plate$/i,/plateunicode|plateutf8|platetext/i,/licen[cs]e.?plate|plate.?(number|no)?$/i,/plate/i].map(r=>find(r,/confidence|country|region|image|picture|state$/i)).find(i=>i>=0);
+  const camera=[/^camera$/i,/camera.?name|camera/i,/source|device|lane|channel|sensor|location|serial/i].map(r=>find(r,/plate|confidence/i)).find(i=>i>=0);
+  const dt=[/date.?time|timestamp|time.?stamp|^datetime$/i,/^(captured|read|event).?(at|time)$/i].map(r=>find(r)).find(i=>i>=0);
+  const date=dt!=null?dt:find(/date|day/i),time=dt!=null?-1:find(/^time$|time/i);
+  return {plate:plate??-1,camera:camera??-1,date:date??-1,time:time==null?-1:time};
+}
+async function importCsv(file){
+  if(!file)return;
+  if(file.size>15e6){toast('That file is over 15 MB. Export a shorter date range and try again.',true);return}
+  const rows=parseDelimited(await file.text());
+  if(!rows.length){toast('That file is empty.',true);return}
+  const header=rows[0].some(c=>/plate|camera|time|date|lane|source|device/i.test(c))&&!rows[0].some(c=>/^\d{4}-\d{2}-\d{2}/.test(c));
+  const width=Math.max(...rows.map(r=>r.length));
+  const cols=header?rows[0].map((c,i)=>c||'Column '+(i+1)):Array.from({length:width},(_,i)=>'Column '+(i+1));
+  const data=header?rows.slice(1):rows;
+  const map=header?guessImportColumns(cols):{plate:0,camera:width>1?1:-1,date:width>2?2:-1,time:-1};
+  UI.imp={name:file.name,cols,data,map,camMap:{},oneCam:''};
+  importAutoMatch();render();
+  setTimeout(()=>{const el=$('#impPanel');if(el)el.scrollIntoView({behavior:'smooth',block:'start'})},50);
+}
+/* Match each camera name in the file to a lane camera with the same name (or one name containing the other). */
+function importAutoMatch(){
+  const im=UI.imp;if(!im||im.map.camera<0)return;
+  const vals=[...new Set(im.data.map(r=>r[im.map.camera]||''))].filter(Boolean);
+  vals.forEach(v=>{if(im.camMap[v])return;const lv=v.toLowerCase();
+    const c=S.cameras.find(x=>x.name.toLowerCase()===lv)||S.cameras.find(x=>lv&&(x.name.toLowerCase().includes(lv)||lv.includes(x.name.toLowerCase())))||S.cameras.find(x=>x.model&&x.model.toLowerCase()===lv);
+    if(c)im.camMap[v]=c.id});
+}
+function importRows(){
+  const im=UI.imp,m=im.map,out=[];let noPlate=0,noTime=0,noCam=0;
+  im.data.forEach(r=>{const plate=normPlate(m.plate>=0?r[m.plate]:'');if(!plate){noPlate++;return}
+    const camId=m.camera>=0?im.camMap[r[m.camera]||'']:im.oneCam;if(!camId||!byId('cameras',camId)){noCam++;return}
+    const at=m.date>=0?parseWhen(r[m.date],m.time>=0?r[m.time]:''):NaN;if(isNaN(at)){noTime++;return}
+    out.push({plate,cameraId:camId,at})});
+  out.sort((a,b)=>a.at-b.at);
+  return {reads:out,noPlate,noTime,noCam};
+}
+function importPreview(){
+  const im=UI.imp,m=im.map,cams=S.cameras;
+  const colSel=(id,val,none)=>`<select id="${id}" data-fresh="1">${none?`<option value="-1" ${val<0?'selected':''}>${esc(none)}</option>`:''}${im.cols.map((c,i)=>`<option value="${i}" ${val===i?'selected':''}>${esc(c)}</option>`).join('')}</select>`;
+  const camOpts=sel=>`<option value="">Skip these rows</option>${cams.map(c=>`<option value="${c.id}" ${sel===c.id?'selected':''}>${esc((facById(c.facilityId)||{}).name||'')} · ${esc(c.name)} (${c.direction==='in'?'entry':'exit'})</option>`).join('')}`;
+  const vals=m.camera>=0?[...new Set(im.data.map(r=>r[m.camera]||''))].filter(Boolean).slice(0,60):[];
+  const res=importRows(),sample=im.data.slice(0,5),tz=Intl.DateTimeFormat().resolvedOptions().timeZone;if(im.skip)res.reads=res.reads.slice(im.skip);
+  const first=res.reads[0],last=res.reads[res.reads.length-1];
+  return `<section class="panel" id="impPanel"><div class="panel-h"><h2>Import ${esc(im.name)}</h2><span class="muted" style="font-size:.84rem">${im.data.length.toLocaleString()} rows · nothing is saved until you import</span></div>
+  <div class="panel-b" style="display:grid;gap:14px">
+    ${cams.length?'':'<div class="callout warn"><b>Add your lane cameras first.</b> Each read has to belong to an entry or exit lane. Add them above, then match them here.</div>'}
+    <div class="form-grid">
+      <div class="field"><label for="impPlate">Plate column</label>${colSel('impPlate',m.plate)}</div>
+      <div class="field"><label for="impCam">Camera column</label>${colSel('impCam',m.camera,'No camera column: one lane for the whole file')}</div>
+      <div class="field"><label for="impDate">Date and time column</label>${colSel('impDate',m.date)}</div>
+      <div class="field"><label for="impTime">Separate time column (optional)</label>${colSel('impTime',m.time,'None: the date column has the time')}</div>
+    </div>
+    ${m.camera<0?`<div class="field"><label for="impOne">Every row is from this lane</label><select id="impOne" data-fresh="1">${camOpts(im.oneCam)}</select></div>`:
+      vals.length?`<div><h3 style="margin:0 0 8px;font-size:1rem">Match each camera in the file to a lane</h3><div class="tbl-wrap"><table><thead><tr><th>In the file</th><th class="r">Rows</th><th>ParkOps lane</th></tr></thead><tbody>${vals.map((v,k)=>`<tr><td class="mono">${esc(v)}</td><td class="r num">${im.data.filter(r=>r[m.camera]===v).length}</td><td><select data-impcam="${k}" data-fresh="1">${camOpts(im.camMap[v])}</select></td></tr>`).join('')}</tbody></table></div></div>`:''}
+    <div class="tbl-wrap"><table><thead><tr>${im.cols.map((c,i)=>`<th class="${[m.plate,m.camera,m.date,m.time].includes(i)?'':'muted'}">${esc(c)}</th>`).join('')}<th>Reads as</th></tr></thead><tbody>${sample.map(r=>{const at=m.date>=0?parseWhen(r[m.date],m.time>=0?r[m.time]:''):NaN;
+      return `<tr>${im.cols.map((c,i)=>`<td class="${[m.plate,m.camera,m.date,m.time].includes(i)?'':'muted'}">${esc(r[i]||'')}</td>`).join('')}<td>${normPlate(r[m.plate]||'')?plateChip(normPlate(r[m.plate]||'')):'<span class="pill warn">No plate</span>'} ${isNaN(at)?'<span class="pill warn">Time not understood</span>':esc(new Date(at).toLocaleString())}</td></tr>`}).join('')}</tbody></table></div>
+    <div class="summary-row"><div><small>Ready to import</small><b>${res.reads.length.toLocaleString()}</b></div><div class="${res.noCam?'over':''}"><small>No lane matched</small><b>${res.noCam}</b></div><div class="${res.noTime?'over':''}"><small>Time not understood</small><b>${res.noTime}</b></div><div><small>No plate</small><b>${res.noPlate}</b></div></div>
+    <p class="note" style="margin:0">${first?`Reads run from ${esc(new Date(first.at).toLocaleString())} to ${esc(new Date(last.at).toLocaleString())}. `:''}Times without a time zone are read as ${esc(tz)} time. Reads are processed oldest first, so each entry pairs with its exit. Reads more than 2 hours old don’t charge saved cards or send alerts.</p>
+    <div class="row"><button class="btn pri" data-act="impRun" ${res.reads.length?'':'disabled'}>Import ${res.reads.length.toLocaleString()} read${res.reads.length===1?'':'s'}</button><button class="btn" data-act="impCancel">Cancel</button></div>
+  </div></section>`;
+}
+async function runImport(){
+  const im=UI.imp;if(!im)return;const reads=importRows().reads.slice(im.skip||0);if(!reads.length)return;
+  const btn=$('[data-act=impRun]');if(btn){btn.disabled=true;btn.textContent='Importing…'}
+  let done=0,saved=0;
+  try{
+    for(let i=0;i<reads.length;i+=500){const chunk=reads.slice(i,i+500);
+      if(HOSTED){const r=await HOSTED.lprImport(chunk);saved+=r.count||0}else{for(const x of chunk){await lprRead(x);saved++}}
+      done+=chunk.length;im.skip=(im.skip||0)+chunk.length;if(btn)btn.textContent=`Importing… ${done.toLocaleString()} of ${reads.length.toLocaleString()}`}
+    toast(`Imported ${saved.toLocaleString()} read${saved===1?'':'s'} from ${im.name}${saved<reads.length?` (${reads.length-saved} couldn’t be processed; see the read log)`:''}`);UI.imp=null;render();
+  }catch(e){toast('Import stopped after '+done.toLocaleString()+' reads: '+((e&&e.message)||'try again')+'. Press Import again to send the rest.',true);render()}
+}
+/* Drop a file anywhere on the Cameras page (or on the drop box) to import it. */
+document.addEventListener('dragover',e=>{if(UI.tab!=='lpr'||!$('#csvDrop'))return;e.preventDefault();$('#csvDrop').classList.add('over')});
+document.addEventListener('dragleave',e=>{const z=$('#csvDrop');if(z&&(!e.relatedTarget||!document.documentElement.contains(e.relatedTarget)))z.classList.remove('over')});
+document.addEventListener('drop',e=>{const z=$('#csvDrop');if(UI.tab!=='lpr'||!z)return;e.preventDefault();z.classList.remove('over');const f=e.dataTransfer&&e.dataTransfer.files&&e.dataTransfer.files[0];if(f)importCsv(f)});
 
 /* ============ settings ============ */
 function vSettings(){
@@ -699,8 +853,12 @@ function vSettings(){
     <div class="field"><label for="sEnfG">Officer grace after paid time ends (min)</label><input id="sEnfG" type="number" value="${esc((S.config&&S.config.enforcementGraceMin)??10)}"></div>
     <div class="field"><label for="sMLate">Monthly late fee ($)</label><input id="sMLate" type="number" step="0.25" value="${esc((S.config&&S.config.monthlyLateFee)??25)}"></div>
     <div class="field"><label for="sMGrace">Suspend monthly parking after (days past due)</label><input id="sMGrace" type="number" value="${esc((S.config&&S.config.monthlyGraceDays)??5)}"></div>
+    ${HOSTED?`<div class="field"><label for="sMRem">Remind monthly parkers this many days before the 1st (0 = off)</label><input id="sMRem" type="number" min="0" max="25" value="${esc((S.config&&S.config.monthlyReminderDays)??5)}"><div class="help">Renewal notice, card-expiring warning and a follow-up when a payment is past due.</div></div>
+    <div class="field"><label for="sMRemSms">Send reminders by</label><select id="sMRemSms"><option value="1" ${S.config&&S.config.monthlyReminderSms===false?'':'selected'}>Email, and text when they gave a mobile</option><option value="0" ${S.config&&S.config.monthlyReminderSms===false?'selected':''}>Email only</option></select></div>`:''}
     <div class="field"><label for="sInvDue">Company invoices due (days after sending)</label><input id="sInvDue" type="number" value="${esc((S.config&&S.config.invoiceDueDays)??5)}"></div>
     <div class="field"><label for="sStale">Flag open visits older than (hours)</label><input id="sStale" type="number" value="${esc((S.config&&S.config.openVisitFlagHours)??24)}"></div>
+    <div class="field"><label for="sRepN">Flag a car that uses the same validation code (times)</label><input id="sRepN" type="number" min="2" value="${esc((S.config&&S.config.repeatValidationCount)??3)}"></div>
+    <div class="field"><label for="sRepD">…within (days)</label><input id="sRepD" type="number" min="1" value="${esc((S.config&&S.config.repeatValidationDays)??7)}"></div>
     <div class="field"><label for="sBrand">Brand color</label><input id="sBrand" type="color" value="${esc((S.config&&S.config.brandColor)||'#1a56cc')}"></div>
     <div class="field"><label for="sStripe">Highlight color</label><input id="sStripe" type="color" value="${esc((S.config&&S.config.brandStripe)||'#e8a800')}"></div>
     <div class="field"><label for="sPrint">Notice printer paper</label><select id="sPrint">${[[2,'2 inch (ZQ110, ZQ210)'],[3,'3 inch (ZQ320, ZQ520, ZQ620)'],[4,'4 inch (ZQ630, ZQ521)']].map(([k,l])=>`<option value="${k}" ${+((S.config&&S.config.printerWidth)||3)===k?'selected':''}>${l}</option>`).join('')}</select></div></div>
@@ -710,7 +868,8 @@ function vSettings(){
     <div class="panel-b" style="padding-top:0"><button class="btn pri">Save schedule</button> <span class="note">Clear a code to remove that row.</span></div></form></section></div>
   <section class="panel"><div class="panel-h"><h2>Records</h2></div><div class="panel-b" style="display:grid;gap:10px">
     <p class="muted" style="margin:0;font-size:.9rem">${S.sessions.length} sessions · ${S.citations.length} notices · ${S.permits.length} monthly parkers · ${S.tenants.length} tenants · ${S.cameras.length} cameras. Remove records marked as samples before going live.</p>
-    <div class="row">${HOSTED?'':'<button class="btn" data-act="refreshSamples">Move sample data to now</button>'}<button class="btn danger" data-act="clearSamples">Remove sample records</button><button class="btn" data-act="pruneSessions">Remove paid sessions older than 90 days</button></div></div></section>
+    <div class="row">${HOSTED?'':'<button class="btn" data-act="refreshSamples">Move sample data to now</button>'}<button class="btn danger" data-act="clearSamples">Remove sample records</button>${HOSTED?'':'<button class="btn" data-act="pruneSessions">Remove paid sessions older than 90 days</button>'}</div>${HOSTED?'<p class="note" style="margin:8px 0 0">Tickets are kept permanently. Find any of them, however old, under History.</p>':''}</div></section>
+  ${HOSTED&&window.scanSettings?window.scanSettings():''}
   ${HOSTED&&window.hostedSettings?window.hostedSettings():''}`;
 }
 
@@ -725,11 +884,12 @@ function vEnforcement(){
   const sweep=R.onSiteSessions(f).filter(s=>s.kind!=='permit'&&!s.noPlate).map(s=>({s,r:R.checkPlate(s.plate,f.id)})).sort((a,b)=>({bad:0,warn:1,ok:2}[a.r.level])-({bad:0,warn:1,ok:2}[b.r.level]));
   const mine=S.citations.filter(c=>c.facilityId===f.id&&now()-c.issuedAt<D).sort((a,b)=>b.issuedAt-a.issuedAt);
   return `<div class="enf">
+  ${HOSTED&&window.scanCard?window.scanCard():''}
   <section class="panel"><form class="panel-b" data-form="check" style="display:grid;gap:12px">
     <div class="row"><div class="field"><label for="enfFac">Patrolling</label><select id="enfFac" data-fresh="1">${S.facilities.map(x=>`<option value="${x.id}" ${x.id===UI.enfFac?'selected':''}>${esc(x.name)}</option>`).join('')}</select></div>
     ${hasRes?`<div class="field"><label>Area</label><div class="seg"><button type="button" data-act="enfZone" data-v="general" aria-pressed="${UI.enfZone!=='reserved'}">General</button><button type="button" data-act="enfZone" data-v="reserved" aria-pressed="${UI.enfZone==='reserved'}">Reserved section</button></div></div>`:''}</div>
     <label for="enfPlate" class="muted" style="font-size:.78rem;font-weight:600">Plate</label>
-    <input id="enfPlate" class="plate-in" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="ENTER PLATE">
+    <input id="enfPlate" class="plate-in" autocomplete="off" autocapitalize="characters" autocorrect="off" spellcheck="false" inputmode="text" enterkeyhint="go" placeholder="ENTER PLATE">
     <button class="btn pri lg">Check plate</button></form></section>
   ${r?`<section class="verdict ${r.level}" aria-live="polite"><div class="row" style="justify-content:space-between;align-items:center"><h2>${esc(r.title)}</h2>${plateChip(r.plate)}</div>
     ${r.lines.length?`<ul>${r.lines.map(l=>`<li>${esc(l)}</li>`).join('')}</ul>`:''}
@@ -786,7 +946,7 @@ function vPortal(){
     <div class="row" style="justify-content:space-between;align-items:center"><span class="note">Pilot mode: a demo card ending 4242 is attached.</span><button class="btn pri">Turn on autopay</button></div></form></section>
   <section class="panel" style="grid-column:1/-1"><div class="panel-h"><h2>Monthly parking</h2></div><form class="panel-b" data-form="apply" style="display:grid;gap:12px">
     ${types.length?`<div class="form-grid"><div class="field"><label for="aName">Full name</label><input id="aName"></div><div class="field"><label for="aEmail">Email</label><input id="aEmail" type="email"></div>
-    <div class="field"><label for="aType">Plan</label><select id="aType">${types.map(t=>`<option value="${t.id}">${esc(t.name)} · ${money0(t.price)}/month</option>`).join('')}</select><div class="help" id="aTypeInfo"></div></div>
+    <div class="field"><label for="aType">Plan</label><select id="aType">${types.map(t=>`<option value="${t.id}">${esc(t.name)} · ${moneyP(t.price)}/month</option>`).join('')}</select><div class="help" id="aTypeInfo"></div></div>
     <div class="field"><label for="aPlates">License plates</label><input id="aPlates" placeholder="Separated by commas" style="text-transform:uppercase"></div></div>
     <div><button class="btn pri">Start monthly parking</button></div>`:'<p class="muted">Monthly parking isn’t open for sign-up right now.</p>'}</form></section>
   </div>
@@ -854,8 +1014,10 @@ dlgForm.addEventListener('click',async e=>{const b=e.target.closest('[data-dlg]'
 let toastT;function toast(msg,err){const t=$('#toast');t.textContent=msg;t.className='toast'+(err?' err':'');t.hidden=false;clearTimeout(toastT);toastT=setTimeout(()=>t.hidden=true,err?5200:3000)}
 
 /* ============ actions ============ */
-const VIEWS={overview:vOverview,activity:vActivity,tenants:vTenants,facilities:vFacilities,permits:vPermits,citations:vCitations,lpr:vLpr,settings:vSettings,reservations:()=>window.vReservations?window.vReservations():'',payments:()=>window.vPayments?window.vPayments():'',selfparking:()=>window.vSelfParking?window.vSelfParking():'',review:()=>window.vReview?window.vReview():'',valet:()=>window.vValet?window.vValet():'',reports:()=>window.vReports?window.vReports():''};
+const VIEWS={overview:vOverview,activity:vActivity,tenants:vTenants,facilities:vFacilities,permits:vPermits,citations:vCitations,lpr:vLpr,settings:vSettings,reservations:()=>window.vReservations?window.vReservations():'',payments:()=>window.vPayments?window.vPayments():'',history:()=>window.vHistory?window.vHistory():'',daily:()=>window.vDaily?window.vDaily():'',selfparking:()=>window.vSelfParking?window.vSelfParking():'',review:()=>window.vReview?window.vReview():'',valet:()=>window.vValet?window.vValet():'',reports:()=>window.vReports?window.vReports():''};
 const ACT={
+  impRun(){runImport()},
+  impCancel(){UI.imp=null;render()},
   goTab(b){UI.tab=b.dataset.tab;store.set('tab',UI.tab);const f=b.dataset.filter;if(f){if(UI.tab==='permits')UI.permitStatus=f==='pending'?'all':f;if(UI.tab==='citations')UI.citeStatus=f;if(UI.tab==='activity'){UI.auditFilter=f;UI.auditRange='week'}if(UI.tab==='selfparking'){UI.spView='tickets';UI.tkStatus=f;UI.tkRange='month'}}
     if(b.dataset.tenant){UI.tenant=b.dataset.tenant;UI.tenantDay=0}if(b.dataset.fac){UI.actFac=b.dataset.fac;store.set('actFac',UI.actFac)}render();window.scrollTo(0,0)},
   permitStatus(b){UI.permitStatus=b.dataset.v;render()},enfZone(b){UI.enfZone=b.dataset.v;render()},citeStatus(b){UI.citeStatus=b.dataset.v;render()},auditFilter(b){UI.auditFilter=b.dataset.v;render()},
@@ -891,6 +1053,15 @@ const ACT={
     openForm({title:'Cancel #'+p.number,submit:'Cancel monthly parking',danger:true,fields:[{id:'when',label:'When',type:'select',options:[['end',`At the end of the paid period (${fmtDate(end-1)})`],['now','Right away (no refund is issued automatically)']],value:'end'}],
       onSubmit:v=>write(db=>col(db,'permits').doc(p.id).update(v.when==='now'?{status:'cancelled',endAt:now(),cancelledAt:now()}:{endAt:end,cancelledAt:now()}),'Cancelled')})},
   editCompany(b){companyForm(b.dataset.id?byId('companies',b.dataset.id):null)},
+  openAccount(b,e){if(e)e.preventDefault();UI.acct=b.dataset.id;UI.acctQ='';UI.acctFilter='current';UI.acctPage=0;render();window.scrollTo(0,0)},
+  closeAccount(){UI.acct=null;render();window.scrollTo(0,0)},
+  acctFilter(b){UI.acctFilter=b.dataset.v;render()},
+  pagePrev(b){UI[b.dataset.k]=Math.max(0,(UI[b.dataset.k]||0)-1);render();window.scrollTo(0,0)},
+  pageNext(b){UI[b.dataset.k]=(UI[b.dataset.k]||0)+1;render();window.scrollTo(0,0)},
+  acctAdd(b){permitForm({companyId:b.dataset.id,_bill:true})},
+  acctBulk(b){if(window.accountBulkDialog)window.accountBulkDialog(b.dataset.id)},
+  acctExport(b){const c=byId('companies',b.dataset.id);if(!c)return;const tz=(S.config&&S.config.timeZone)||'America/Chicago',rows=S.permits.filter(p=>p.companyId===c.id).sort((a,b)=>(a.holder||'').localeCompare(b.holder||''));
+    saveFile((c.name||'account').replace(/[^\w]+/g,'-').toLowerCase()+'-parkers.csv',csv([['Number','Name','Email','Phone','Plan','Plates','Status','Paid through','Started','Ends'],...rows.map(p=>[p.number,safeCell(p.holder),safeCell(p.email||''),p.phone||'',(typeById(p.permitTypeId)||{}).name||'',(p.plates||[]).join(' '),mStatus(p),p.paidThrough?fmtDate(p.paidThrough-1,tz):'',p.startAt?fmtDate(p.startAt,tz):'',p.endAt?fmtDate(p.endAt-1,tz):''])]))},
   async sendCompanyLink(b){try{await HOSTED.api('POST','/api/admin/companies/'+b.dataset.id+'/send-link');toast('Portal link emailed')}catch(e){toast(e.message,true)}},
   async runBilling(b){b.disabled=true;try{const r=await HOSTED.api('POST','/api/admin/billing/run');toast(r.billed?`Billed ${r.billed} account${r.billed>1?'s':''}`:'Nothing is due right now')}catch(e){toast(e.message,true)}b.disabled=false},
   async invoicePaid(b){const i=byId('invoices',b.dataset.id);confirmBox('Mark invoice paid',`Mark ${esc(i.companyName)}’s ${esc(i.period)} invoice (${money(i.amount)}) as paid outside Square? Its parkers are reactivated.`,'Mark paid',async()=>{try{await HOSTED.api('POST','/api/admin/invoices/'+i.id+'/paid');toast('Invoice marked paid');return true}catch(e){return e.message}})},
@@ -940,7 +1111,7 @@ const FORMS={
     let photoIds=[];if(HOSTED&&window.citePhotoIds)photoIds=window.citePhotoIds(UI.check.plate,UI.check.facId);
     const ok=await issueCitation({plate:UI.check.plate,facId:UI.check.facId,code:$('#citeViol').value,officer,notes:$('#citeNotes').value.trim(),plateState:($('#citeState')||{}).value,photoIds});
     if(ok){$('#citeNotes').value='';if(window.clearCitePhotos)window.clearCitePhotos();render()}},
-  async settings(){const g=+$('#sGrace').value||48;await write(db=>db.doc('settings/config').set(Object.assign({},S.config||{},{campusName:$('#sCampus').value.trim(),timeZone:$('#sTz').value,unpaidGraceHours:g,lateFee:Math.max(0,+$('#sLate').value||0),autoCiteHours:Math.max(0,+$('#sCiteH').value||0),hotListAmount:Math.max(1,+$('#sHotAmt').value||100),hotListCount:Math.max(1,+$('#sHotN').value||3),alertEmail:$('#sAlert').value.trim(),printerWidth:+$('#sPrint').value||3,taxRate:Math.max(0,Math.min(20,+$('#sTax').value||0)),taxIncluded:$('#sTaxInc').value==='1',enforcementGraceMin:Math.max(0,+$('#sEnfG').value||0),monthlyLateFee:Math.max(0,+$('#sMLate').value||0),monthlyGraceDays:Math.max(1,+$('#sMGrace').value||5),invoiceDueDays:Math.max(1,+$('#sInvDue').value||5),openVisitFlagHours:Math.max(1,+$('#sStale').value||24),brandColor:$('#sBrand').value,brandStripe:$('#sStripe').value})),'Settings saved')},
+  async settings(){const g=+$('#sGrace').value||48;await write(db=>db.doc('settings/config').set(Object.assign({},S.config||{},{repeatValidationCount:Math.max(2,Math.round(+(($('#sRepN')||{}).value)||3)),repeatValidationDays:Math.max(1,Math.round(+(($('#sRepD')||{}).value)||7)),campusName:$('#sCampus').value.trim(),timeZone:$('#sTz').value,unpaidGraceHours:g,lateFee:Math.max(0,+$('#sLate').value||0),autoCiteHours:Math.max(0,+$('#sCiteH').value||0),hotListAmount:Math.max(1,+$('#sHotAmt').value||100),hotListCount:Math.max(1,+$('#sHotN').value||3),alertEmail:$('#sAlert').value.trim(),printerWidth:+$('#sPrint').value||3,taxRate:Math.max(0,Math.min(20,+$('#sTax').value||0)),taxIncluded:$('#sTaxInc').value==='1',enforcementGraceMin:Math.max(0,+$('#sEnfG').value||0),monthlyLateFee:Math.max(0,+$('#sMLate').value||0),monthlyGraceDays:Math.max(1,+$('#sMGrace').value||5),invoiceDueDays:Math.max(1,+$('#sInvDue').value||5),...($('#sMRem')?{monthlyReminderDays:Math.max(0,Math.min(25,+$('#sMRem').value||0)),monthlyReminderSms:$('#sMRemSms').value==='1'}:{}),openVisitFlagHours:Math.max(1,+$('#sStale').value||24),brandColor:$('#sBrand').value,brandStripe:$('#sStripe').value})),'Settings saved')},
   async violations(){const v=[];violations().forEach((_,i)=>{const code=normPlate($('#vc'+i).value);if(!code)return;v.push({code,name:$('#vn'+i).value.trim()||code,fine:+$('#vf'+i).value||0})});
     if(new Set(v.map(x=>x.code)).size!==v.length){toast('Each violation needs a unique code.',true);return}
     await write(db=>db.doc('settings/config').set(Object.assign({},S.config||{},{violations:v})),'Violation schedule saved')},
@@ -960,7 +1131,7 @@ document.addEventListener('click',e=>{
 });
 document.addEventListener('submit',e=>{const f=e.target.closest('#main form[data-form]');if(!f)return;e.preventDefault();const fn=FORMS[f.dataset.form];if(fn)fn(f)});
 let qT;document.addEventListener('input',e=>{const id=e.target.id;
-  if(id==='permitQ'||id==='citeQ'){clearTimeout(qT);qT=setTimeout(()=>{UI[id]=e.target.value;render()},200)}
+  if(id==='permitQ'||id==='citeQ'||id==='acctQ'||id==='coQ'||id==='coEq'){clearTimeout(qT);qT=setTimeout(()=>{UI[id]=e.target.value;if(id==='coQ')UI.coPage=0;render()},200)}
   if(id==='pHours'||id==='pFac')updateQuote();if(id==='aType')updateTypeInfo()});
 document.addEventListener('change',async e=>{const id=e.target.id;
   if(id==='enfFac'){UI.enfFac=e.target.value;store.set('enfFac',UI.enfFac);UI.check=null;UI.lastCite=null;render()}
@@ -968,6 +1139,9 @@ document.addEventListener('change',async e=>{const id=e.target.id;
   if(id==='auditRange'){UI.auditRange=e.target.value;render()}
   if(id==='pHours'||id==='pFac')updateQuote();if(id==='aType')updateTypeInfo();
   if(id==='csvFile'&&e.target.files[0]){await importCsv(e.target.files[0]);e.target.value=''}
+  if(UI.imp&&['impPlate','impCam','impDate','impTime'].includes(id)){const k={impPlate:'plate',impCam:'camera',impDate:'date',impTime:'time'}[id];UI.imp.map[k]=+e.target.value;if(k==='camera')importAutoMatch();render()}
+  if(UI.imp&&id==='impOne'){UI.imp.oneCam=e.target.value;render()}
+  if(UI.imp&&e.target.dataset&&e.target.dataset.impcam!=null){const m=UI.imp.map,vals=[...new Set(UI.imp.data.map(r=>r[m.camera]||''))].filter(Boolean);const v=vals[+e.target.dataset.impcam];if(v!=null){UI.imp.camMap[v]=e.target.value;render()}}
   if(id==='citePhotos'&&e.target.files.length&&window.addCitePhotos){await window.addCitePhotos(e.target.files);e.target.value=''}});
 setInterval(()=>{if(!dlg.open&&isLoaded())schedule()},30000);
 render();boot();

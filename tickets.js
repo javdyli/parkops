@@ -56,11 +56,13 @@
   const dlgErrorOrOk = r => r && r.error ? r.error : true;
   window.payTicketDialog = function (id, opts) {
     const s = byId('sessions', id); if (!s) return; opts = opts || {};
-    const b = R.ticketBill(s), due = b.due; if (!(due > 0)) { toast('Nothing is owed on this ticket.'); return; }
+    // Event nights: opts.entry collects the flat event rate at the entrance and leaves the ticket open.
+    if (opts.entry) opts.close = false;
+    const b = R.ticketBill(s), due = opts.entry ? R.entryDue(s) : b.due; if (!(due > 0)) { toast('Nothing is owed on this ticket.'); return; }
     const methods = [['cash', 'Cash'], ['card', 'Card (external terminal or reader)'], ['check', 'Check']].concat(can('tickets.adjust') ? [['comp', 'Complimentary (no money, reason required)']] : []);
-    openForm({ title: `Collect ${money(due)} · ${s.plate}`, submit: opts.close && !s.endAt ? 'Collect and close ticket' : 'Record payment', fields: [
+    openForm({ title: opts.entry ? `Event rate ${money(due)} · ${s.plate}` : `Collect ${money(due)} · ${s.plate}`, submit: opts.close && !s.endAt ? 'Collect and close ticket' : opts.entry ? 'Record payment · car stays' : 'Record payment', fields: [
       { id: 'method', label: 'Paid with', type: 'select', options: methods, value: 'cash' },
-      { id: 'amount', label: 'Amount ($) · leave as is for full payment', type: 'number', step: '0.01', value: due.toFixed(2), required: true, help: `${money(due)} due${b.tax.tax ? ` (includes ${money(b.tax.tax)} tax)` : ''}. A partial payment leaves the rest owed on the ticket.` },
+      { id: 'amount', label: 'Amount ($) · leave as is for full payment', type: 'number', step: '0.01', value: due.toFixed(2), required: true, help: `${money(due)} due${b.tax.tax ? ` (includes ${money(b.tax.tax)} tax)` : ''}. A partial payment leaves the rest owed on the ticket${opts.close && !s.endAt && !can('tickets.adjust') ? ', and only a manager can close a ticket with money still owed, so collect the full amount' : ''}.` },
       { id: 'tendered', label: 'Cash tendered ($)', type: 'number', step: '0.01', value: '', help: 'Type what the driver hands you; change due appears below. Leave blank for exact change.' },
       { id: 'note', label: 'Note (reason, for complimentary)', value: '' },
     ], extra: `<button type="button" class="btn" id="payExact">Exactly ${money(due)}</button> <span id="changeDue" class="note"></span>`,
@@ -94,9 +96,9 @@
   window.closeTicketDialog = function (id) {
     const s = byId('sessions', id); if (!s || s.endAt) return;
     const due = R.balanceOf(s);
-    openForm({ title: `Close ticket ${tk(s)} · ${s.plate}`, submit: 'Confirm departure', fields: [
+    openForm({ title: due > 0 ? `Let out unpaid · ${tk(s)} · ${s.plate}` : `Close ticket ${tk(s)} · ${s.plate}`, submit: due > 0 ? 'Let out unpaid' : 'Confirm departure', danger: due > 0, fields: [
       { id: 'at', label: 'Departure time', type: 'datetime-local', value: dtLocal(now()), help: can('tickets.adjust') ? '' : 'Up to 15 minutes ago; earlier times need a manager.' },
-      { id: 'reason', label: 'Note', value: '', help: due > 0 ? `${money(due)} is owed. Closing without payment leaves the balance for collections; use Collect to take payment first.` : 'Nothing is owed.' },
+      { id: 'reason', label: due > 0 ? 'Reason for letting this car out unpaid' : 'Note', value: '', required: due > 0, help: due > 0 ? `${money(due)} is owed. The balance stays on the books and goes to collections, and your name and this reason are kept on the ticket. To take payment instead, close this and use Collect.` : 'Nothing is owed.' },
     ], onSubmit: async v => { const at = v.at ? new Date(v.at).getTime() : now(); const r = await ticketAction(id, 'close', { at, reason: v.reason }, r => r.balance > 0 ? `Closed · ${money(r.balance)} left unpaid` : 'Ticket closed'); return dlgErrorOrOk(r); } });
   };
   window.adjustTicketDialog = function (id) {
@@ -153,21 +155,23 @@
     const done = UI.deskDone && UI.deskDone.id === s.id ? UI.deskDone : null;
     const pill = s.kind === 'permit' ? '<span class="pill ok">Monthly parker</span>' : s.vipFree ? '<span class="pill ok">VIP · no charge</span>' : s.validation ? `<span class="pill info">Validated · ${esc(s.validation.code)}</span>` : R.needsReview(s) ? '<span class="pill warn">Held for review</span>' : '';
     const hot = R.isHot(normPlate(s.plate));
-    return `<section class="panel"><div class="panel-h"><h2>${esc(tk(s))}</h2>${pill}${hot ? `<span class="pill bad">Hot list · ${money(hot.total)} owed</span>` : ''}<span class="muted" style="font-size:.84rem">${esc(f ? f.name : '')}</span></div>
+    const entry = !s.endAt ? R.entryDue(s) : 0, ev = entry > 0 ? R.eventAt(R.facFor(s), s.startAt) : null;
+    return `<section class="panel"><div class="panel-h"><h2>${esc(tk(s))}</h2>${pill}${ev ? `<span class="pill info">${esc(ev.name || 'Event')} night</span>` : ''}${hot ? `<span class="pill bad">Hot list · ${money(hot.total)} owed</span>` : ''}<span class="muted" style="font-size:.84rem">${esc(f ? f.name : '')}</span></div>
     <div class="panel-b" style="display:grid;gap:14px">
       <div class="row" style="align-items:center;gap:12px">${plateChip(s.plate)}${typeTag(s)}${s.valet ? `<span class="tag">Key ${esc(s.valet.tag || '—')} · ${esc(s.valet.space || '')}</span>` : ''}</div>
-      <div class="due ${due > 0 ? '' : 'zero'}"><div><small class="muted" style="text-transform:uppercase;letter-spacing:.07em;font-weight:600">${due > 0 ? 'Amount due' : 'Nothing due'}</small><b>${money(due)}</b>${b.tax.tax && due > 0 ? `<div class="note">Includes ${money(R.taxOf(due).tax)} sales tax</div>` : ''}</div>
+      <div class="due ${due > 0 || entry > 0 ? '' : 'zero'}"><div><small class="muted" style="text-transform:uppercase;letter-spacing:.07em;font-weight:600">${entry > 0 && entry >= due ? 'Event rate due now' : due > 0 ? 'Amount due' : 'Nothing due'}</small><b>${money(entry > 0 && entry >= due ? entry : due)}</b>${b.tax.tax && (due > 0 || entry > 0) ? `<div class="note">Includes ${money(R.taxOf(entry > 0 && entry >= due ? entry : due).tax)} sales tax</div>` : ''}</div>
         <div class="facts" style="flex:1"><div><small>Arrived</small><b>${fmtTime(s.startAt, tz)}</b></div><div><small>Time parked</small><b>${dur(now() - s.startAt)}</b></div><div><small>Rate</small><b>${esc(R.rateSummary(R.facFor(s))[0] || '')}</b>${(() => { const rr = (R.facFor(s) || {}).rates || {}; return +rr.dailyMax > 0 ? `<span class="note">Daily max ${money(rr.dailyMax)}${rr.rolling ? ' per 24 h from arrival' : ' · day resets ' + esc(String(rr.resetTime || '00:00'))}</span>` : ''; })()}</div>${s.mode === 'prepaid' ? `<div><small>Prepaid until</small><b>${fmtTime(s.paidUntil, tz)}</b></div>` : ''}</div></div>
       ${billTable(b, s)}
       ${done ? `<div class="receipt" role="status"><b>Paid ${money(done.amount)}${done.change > 0 ? ' · change due ' + money(done.change) : ''}</b><br>${s.endAt ? 'Ticket closed. ' : ''}<button class="btn sm" data-act="printReceipt" data-id="${esc(s.id)}">Print receipt</button> <button class="btn sm" data-act="deskClear">Next car <span class="kbd">F2</span></button></div>` : ''}
-      ${!s.endAt ? `<div class="row" style="gap:8px">
+      ${entry > 0 ? `<div class="receipt" role="status"><b>${esc(ev.name || 'Event')} night: collect ${money(entry)} at the entrance.</b><br>The ticket stays open and the exit is already paid. A car still inside after the ${esc(String(((R.facFor(s) || {}).rates || {}).resetTime || '03:00'))} reset owes the new day when it leaves.</div>
+      <div class="row" style="gap:8px"><button class="btn pri lg" data-act="deskPayEntry" data-id="${esc(s.id)}" data-perm="tickets">Collect ${money(entry)} event rate</button>${terminal ? `<button class="btn lg" data-act="deskTerminalEntry" data-id="${esc(s.id)}" data-perm="tickets">Square Terminal</button>` : ''}${S.validations.some(v => v.active && v.eventNights) ? `<button class="btn lg" data-act="validateSession" data-id="${esc(s.id)}" data-perm="tickets">Event-night code</button>` : ''}<button class="btn lg" data-act="openTicket" data-id="${esc(s.id)}">Details</button></div>` : !s.endAt ? `<div class="row" style="gap:8px">
         ${due > 0 ? `<button class="btn pri lg" data-act="deskPay" data-id="${esc(s.id)}" data-perm="tickets">Collect ${money(due)}</button>` : `<button class="btn pri lg" data-act="deskClose" data-id="${esc(s.id)}" data-perm="tickets">Close · nothing due</button>`}
         ${due > 0 && terminal ? `<button class="btn lg" data-act="deskTerminal" data-id="${esc(s.id)}" data-perm="tickets">Square Terminal</button>` : ''}
         ${due > 0 && hosted && member && window.chargeCardOnFile ? `<button class="btn lg" data-act="deskCardOnFile" data-id="${esc(s.id)}" data-perm="tickets">Card on file</button>` : ''}
         ${!s.validation && due > 0 ? `<button class="btn lg" data-act="validateSession" data-id="${esc(s.id)}" data-perm="tickets">Validation code</button>` : ''}
-        ${due > 0 ? `<button class="btn lg" data-act="deskClose" data-id="${esc(s.id)}" data-perm="tickets">Let out unpaid</button>` : ''}
+        ${due > 0 ? `<button class="btn lg" data-act="deskClose" data-id="${esc(s.id)}" data-perm="tickets.adjust">Let out unpaid${can('tickets.adjust') ? '' : ' · manager'}</button>` : ''}
         <button class="btn lg" data-act="openTicket" data-id="${esc(s.id)}">Details</button></div>
-        <p class="note" style="margin:0">Cash and external card payments are recorded here and go on the shift report. ${terminal ? 'Square Terminal sends the amount to the booth device for the driver to tap.' : hosted ? 'Add a Square Terminal device ID to this location to charge cards on a terminal.' : ''}</p>` : `<div class="row"><button class="btn" data-act="printReceipt" data-id="${esc(s.id)}">Print receipt</button><button class="btn" data-act="openTicket" data-id="${esc(s.id)}">Details</button><button class="btn" data-act="deskClear">Next car</button></div>`}
+        <p class="note" style="margin:0">${due > 0 && !can('tickets.adjust') ? 'Only a manager or owner can let a car out with money owed. ' : ''}Cash and external card payments are recorded here and go on the shift report. ${terminal ? 'Square Terminal sends the amount to the booth device for the driver to tap.' : hosted ? 'Add a Square Terminal device ID to this location to charge cards on a terminal.' : ''}</p>` : `<div class="row"><button class="btn" data-act="printReceipt" data-id="${esc(s.id)}">Print receipt</button><button class="btn" data-act="openTicket" data-id="${esc(s.id)}">Details</button><button class="btn" data-act="deskClear">Next car</button></div>`}
     </div></section>`;
   }
   function billTable(b, s) {
@@ -292,10 +296,11 @@
           </div>
           ${hosted && (s.entryPhotoId || s.exitPhotoId) ? `<div class="thumbs">${[s.entryPhotoId, s.exitPhotoId].filter(Boolean).map(p => `<a href="/photos/${esc(p)}" target="_blank" rel="noopener"><img src="/photos/${esc(p)}" alt="Plate photo" loading="lazy"></a>`).join('')}</div>` : ''}
           <div class="row" style="gap:8px">
-            ${b.due > 0 && !R.needsReview(s) && !(s.missedExit && !s.missedResolved) ? act('deskPay', open ? `Collect ${money(b.due)} and close` : `Collect ${money(b.due)}`, 'tickets', 'pri') : ''}
+            ${open && R.entryDue(s) > 0 ? act('deskPayEntry', `Collect ${money(R.entryDue(s))} event rate`, 'tickets', 'pri') : ''}
+            ${b.due > 0 && !R.needsReview(s) && !(s.missedExit && !s.missedResolved) ? act('deskPay', open ? `Collect ${money(b.due)} and close` : `Collect ${money(b.due)}`, 'tickets', R.entryDue(s) > 0 ? '' : 'pri') : ''}
             ${b.due > 0 && terminal ? act('deskTerminal', 'Square Terminal', 'tickets') : ''}
             ${b.due > 0 && hosted && member && window.chargeCardOnFile ? act('deskCardOnFile', 'Charge card on file', 'tickets') : ''}
-            ${open ? act('deskClose', b.due > 0 ? 'Close (leave unpaid)' : 'Close ticket', 'tickets') : act('reopenTicket', 'Reopen', 'tickets.adjust')}
+            ${open ? act('deskClose', b.due > 0 ? 'Let out unpaid' : 'Close ticket', b.due > 0 ? 'tickets.adjust' : 'tickets') : act('reopenTicket', 'Reopen', 'tickets.adjust')}
             ${!s.validation ? act('validateSession', 'Apply validation', 'tickets') : act('validateSession', 'Replace validation', 'tickets.adjust') + act('removeValidation', 'Remove validation', 'tickets.adjust')}
             ${!open ? act('adjustFee', 'Adjust fee', 'tickets.adjust') : ''}
             ${s.waived ? act('unwaive', 'Remove waiver', 'tickets.adjust') : (b.due > 0 || open) ? act('waiveSession', 'Waive', 'tickets.adjust') : ''}
@@ -410,7 +415,7 @@
   function importLocal(rows, dry) {
     const norm = s => String(s || '').trim().toLowerCase(), created = [], skipped = [], ops = [];
     const planOf = x => S.permitTypes.find(t => t.id === x || norm(t.name) === norm(x)), coOf = x => x && S.companies.find(c => c.id === x || norm(c.name) === norm(x));
-    const taken = new Map(); S.permits.forEach(pm => { if (['active', 'approved', 'pending', 'suspended'].includes(pm.status) && (!pm.endAt || pm.endAt > now())) (pm.plates || []).forEach(pl => taken.set(normPlate(pl), pm.number)); });
+    const usedNums = new Set(S.permits.map(pm => String(pm.number))), taken = new Map(); S.permits.forEach(pm => { if (['active', 'approved', 'pending', 'suspended'].includes(pm.status) && (!pm.endAt || pm.endAt > now())) (pm.plates || []).forEach(pl => taken.set(normPlate(pl), pm.number)); });
     rows.forEach((r, i) => {
       const line = i + 1, holder = String(r.name || '').trim().slice(0, 80), plates = [...new Set(String(r.plates || '').split(/[,;|\s]+/).map(normPlate).filter(Boolean))], plan = planOf(r.plan), co = coOf(r.company);
       if (!holder) return skipped.push({ line, reason: 'No name' });
@@ -419,7 +424,7 @@
       if (r.company && !co) return skipped.push({ line, reason: `Unknown company "${r.company}"` });
       const dup = plates.find(pl => taken.has(pl)); if (dup) return skipped.push({ line, reason: `${dup} is already on monthly #${taken.get(dup)}` });
       const f = facById((plan.facilities || [])[0]), mb = R.monthBounds(now(), f); let paidThrough = mb.end; if (r.paidThrough) { const pt = R.endOfDate(r.paidThrough, f) || Date.parse(r.paidThrough); if (pt > 0) paidThrough = pt; }
-      const number = String(r.number || '').trim().slice(0, 12) || String(10000 + Math.floor(Math.random() * 89999)), email = norm(r.email);
+      let number = String(r.number || '').trim().slice(0, 12); if (!number || usedNums.has(number)) number = R.newMonthlyNumber(usedNums); usedNums.add(number); const email = norm(r.email);
       plates.forEach(pl => taken.set(pl, number)); created.push({ line, holder, plates, plan: plan.name, company: co ? co.name : '', paidThrough });
       ops.push({ type: 'set', coll: 'permits', id: R.uid('p'), data: { holder, email: /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email) ? email : '', phone: String(r.phone || '').slice(0, 30), permitTypeId: plan.id, plates: plates.slice(0, plan.maxVehicles || 3), companyId: co ? co.id : null, companyName: co ? co.name : '', number, status: 'active', billing: co ? 'company' : 'office', createdAt: now(), startAt: r.startAt && Date.parse(r.startAt) > 0 ? Date.parse(r.startAt) : now(), endAt: null, paidThrough, source: 'import', importedAt: now(), notes: String(r.notes || '').slice(0, 300) } });
     });
@@ -458,6 +463,56 @@
     };
   };
 
+  /* A pasted list of people for one account: name, email, plates, phone (a header row is optional). Shared with the account link. */
+  window.parseParkerList = function (text) {
+    const rows = parseCsv(String(text || '')); if (!rows.length) return [];
+    const known = c => HEAD_MAP[String(c).trim().toLowerCase()];
+    if (rows[0].some(c => ['name', 'plates'].includes(known(c)))) return rowsToObjects(rows);
+    /* No header: name, email, plates, phone. A row of just two cells is a name and either an email or the plates. */
+    return rows.map(r => { const c = r.map(x => String(x || '').trim()); if (c.length >= 3) return { name: c[0], email: c[1], plates: c[2], phone: c[3] || '' }; const emailSecond = /@/.test(c[1] || ''); return { name: c[0], email: emailSecond ? c[1] : '', plates: emailSecond ? '' : (c[1] || ''), phone: '' }; });
+  };
+  window.accountBulkDialog = function (companyId) {
+    const co = byId('companies', companyId); if (!co) return;
+    const plans = S.permitTypes.filter(t => !R.accountRoom(co.id, t.id, { adding: 0 }).error), room = R.accountRoom(co.id, null, { adding: 0 });
+    if (!plans.length) { toast('No plan fits this account. Check the plans and locations on the account.', true); return; }
+    let parsed = null;
+    dlgCfg = null;
+    dlgForm.innerHTML = `<div class="dlg-h"><h2>Add many to ${esc(co.name)}</h2><button type="button" class="btn sm" data-dlg="close">Close</button></div>
+      <div class="dlg-b" style="display:grid;gap:12px">
+        <p class="note" style="margin:0">Paste one person per line, or choose a spreadsheet saved as CSV. Columns: <b>name, email, plates, phone</b> (a header row is fine; add a <b>plan</b> column if people are on different plans). Several plates: separate with a semicolon. ${room.max ? `<b>${room.used.toLocaleString()} of ${room.max.toLocaleString()}</b> spaces are used, so up to <b>${room.left.toLocaleString()}</b> more can be added.` : 'This account has no parker limit.'}</p>
+        <div class="form-grid"><div class="field"><label for="abPlan">Plan for everyone (unless a row names one)</label><select id="abPlan">${plans.map(t => `<option value="${esc(t.id)}">${esc(t.name)} · ${moneyP(t.price)}/mo</option>`).join('')}</select></div>
+        <div class="field"><label for="abMonth">This month</label><select id="abMonth"><option value="no">Already paid for this month</option><option value="bill">New: bill the rest of this month</option></select></div></div>
+        <div class="field"><label for="abFile">Spreadsheet (CSV)</label><input id="abFile" type="file" accept=".csv,.txt,text/csv,text/tab-separated-values"></div>
+        <div class="field"><label for="abText">…or paste the list</label><textarea id="abText" rows="6" placeholder="Ana Reyes, ana@example.com, ABC1234, 817-555-0100&#10;Ben Ortiz, ben@example.com, XYZ987;QRS456"></textarea></div>
+        <div id="abPrev"></div><p id="abErr" class="pill bad" hidden></p></div>
+      <div class="dlg-f"><button type="button" class="btn" data-dlg="close">Cancel</button><button type="button" class="btn" id="abCheck">Preview</button><button type="button" class="btn pri" id="abGo" disabled>Add</button></div>`;
+    dlg.showModal();
+    const err = m => { const e = $('#abErr', dlgForm); e.textContent = m || ''; e.hidden = !m; };
+    const read = async () => { const f = $('#abFile', dlgForm).files[0]; const text = f ? await f.text() : $('#abText', dlgForm).value; const rows = window.parseParkerList(text); if (!rows.length) throw new Error('Paste at least one person.'); if (rows.length > 1000) throw new Error('Up to 1,000 people at a time. Split the list in two.'); return rows; };
+    const run = async (dry) => {
+      const body = { planId: $('#abPlan', dlgForm).value, prorate: $('#abMonth', dlgForm).value === 'bill', rows: parsed, dryRun: dry };
+      if (HOSTED) return HOSTED.api('POST', '/api/admin/companies/' + encodeURIComponent(co.id) + '/parkers', body);
+      const r = R.planAccountParkers({ companyId: co.id, planId: body.planId, rows: body.rows, prorate: body.prorate, staff: true, source: 'account' });
+      if (r.error) throw new Error(r.error);
+      if (!dry && r.ops.length) { applyLocal(r.ops); const ok = await write(db => execOps(db, r.ops)); if (!ok) throw new Error('Couldn’t save.'); }
+      return r;
+    };
+    const show = (r, dry) => {
+      $('#abPrev', dlgForm).innerHTML = `<div class="split"><span><b>${r.created.length.toLocaleString()}</b> ${dry ? 'ready to add' : 'added'}${r.created.some(c => c.status === 'waitlist') ? ` (${r.created.filter(c => c.status === 'waitlist').length} on the waitlist: the plan is full)` : ''}</span><span><b>${r.skipped.length.toLocaleString()}</b> skipped</span></div>
+        ${r.skipped.length ? `<div class="imp-prev"><table><thead><tr><th>Row</th><th>Why it was skipped</th></tr></thead><tbody>${r.skipped.slice(0, 200).map(x => `<tr><td class="num">${x.line}</td><td>${esc(x.reason)}</td></tr>`).join('')}</tbody></table></div>` : ''}
+        ${r.created.length ? `<div class="imp-prev"><table><thead><tr><th>Row</th><th>Parker</th><th>Plates</th><th>Plan</th></tr></thead><tbody>${r.created.slice(0, 200).map(c => `<tr><td class="num">${c.line}</td><td>${esc(c.holder)}${c.status === 'waitlist' ? ' <span class="pill warn">Waitlist</span>' : ''}${c.email ? '' : '<span class="sub">No email: they won’t get reminders</span>'}</td><td>${esc(c.plates.join(', '))}</td><td>${esc(c.plan)}</td></tr>`).join('')}${r.created.length > 200 ? `<tr><td colspan="4" class="muted">…and ${(r.created.length - 200).toLocaleString()} more</td></tr>` : ''}</tbody></table></div>` : ''}`;
+    };
+    $('#abCheck', dlgForm).onclick = async () => {
+      err(''); try { parsed = await read(); const r = await run(true); show(r, true); const go = $('#abGo', dlgForm); go.disabled = !r.created.length; go.textContent = r.created.length ? `Add ${r.created.length.toLocaleString()} parker${r.created.length === 1 ? '' : 's'}` : 'Add'; }
+      catch (e) { err(e.message); }
+    };
+    $('#abGo', dlgForm).onclick = async () => {
+      if (!parsed) return; err(''); const go = $('#abGo', dlgForm); go.disabled = true;
+      try { const r = await run(false); show(r, false); toast(`${r.created.length.toLocaleString()} parker${r.created.length === 1 ? '' : 's'} added to ${co.name}`); go.textContent = 'Done'; go.onclick = () => dlg.close(); go.disabled = false; $('#abCheck', dlgForm).hidden = true; render(); }
+      catch (e) { err(e.message); go.disabled = false; }
+    };
+  };
+
   /* ---------- actions ---------- */
   Object.assign(ACT, {
     importMonthly() { window.importMonthlyDialog(); },
@@ -469,6 +524,8 @@
     deskPay(b) { const s = byId('sessions', b.dataset.id); window.payTicketDialog(b.dataset.id, { close: !s.endAt, after: () => { UI.deskTicket = b.dataset.id; } }); },
     deskClose(b) { window.closeTicketDialog(b.dataset.id); },
     deskTerminal(b) { if (window.terminalCheckout) window.terminalCheckout(b.dataset.id); },
+    deskPayEntry(b) { window.payTicketDialog(b.dataset.id, { entry: true, after: () => { UI.deskTicket = b.dataset.id; } }); },
+    deskTerminalEntry(b) { if (window.terminalCheckout) window.terminalCheckout(b.dataset.id, { entry: true }); },
     deskCardOnFile(b) { if (window.chargeCardOnFile) window.chargeCardOnFile(b.dataset.id); },
     newTicket(b) { window.newTicketDialog(b.dataset.plate || normPlate(UI.deskQ || ''), UI.deskFac); },
     newValet() { window.newTicketDialog('', UI.valetFac, true); },

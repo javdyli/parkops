@@ -117,6 +117,7 @@ td .sub{display:block;font-size:.8rem;color:var(--muted)}
 .empty{padding:28px 16px;text-align:center;color:var(--muted)}
 
 /* buttons & forms */
+a.btn{text-decoration:none;color:var(--fg);display:inline-block}
 .btn{border:1px solid var(--line);background:var(--surface);padding:7px 13px;border-radius:6px;cursor:pointer;font-weight:600;font-size:.88rem;white-space:nowrap}
 .btn:hover{border-color:var(--muted)}
 .btn.sm{padding:3px 9px;font-size:.8rem}
@@ -272,4 +273,14 @@ tr.click:hover td{background:var(--surface-2)}
 .termbox{display:grid;gap:10px;justify-items:center;text-align:center;padding:10px 0}.termbox .amt{font-family:var(--f-head);font-size:2.4rem;font-weight:700}.termbox .st{font-weight:600}
 .spin{width:28px;height:28px;border:3px solid var(--line);border-top-color:var(--accent);border-radius:50%;animation:spin 1s linear infinite}@keyframes spin{to{transform:rotate(360deg)}}
 .imp-prev{max-height:280px;overflow:auto;border:1px solid var(--line);border-radius:var(--r)}
+/* phones and tablets: no double-tap zoom on buttons, finger-sized targets, and 16px fields so iOS doesn't zoom in when one is tapped */
+button,[data-act],select,summary,label{touch-action:manipulation}
+@media (pointer:coarse){.btn{min-height:44px}.btn.sm{min-height:38px}.seg button{min-height:40px}input,select,textarea{font-size:16px}}
+/* Vendor credit under every page (driver portal and console) */
+.powered{text-align:center;font-size:.75rem;color:var(--muted);padding:20px 16px 28px}
+@media print{.powered{display:none}}
+.dropzone{display:grid;gap:4px;place-items:center;text-align:center;border:2px dashed var(--line);border-radius:10px;padding:22px 14px;cursor:pointer;background:var(--surface-2)}
+.dropzone:hover,.dropzone.over{border-color:var(--accent);background:color-mix(in srgb,var(--accent) 8%,var(--surface))}
+.dropzone:focus-within{outline:2px solid var(--accent);outline-offset:2px}
+.sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
 </style>
