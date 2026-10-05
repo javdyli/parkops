@@ -1,4 +1,5 @@
 <!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes"><meta name="mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-title" content="ParkOps"><meta name="apple-mobile-web-app-status-bar-style" content="default"><meta name="format-detection" content="telephone=no"><meta name="theme-color" content="#1a56cc">
 <title>ParkOps</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -122,6 +123,7 @@ td .sub{display:block;font-size:.8rem;color:var(--muted)}
 .empty{padding:28px 16px;text-align:center;color:var(--muted)}
 
 /* buttons & forms */
+a.btn{text-decoration:none;color:var(--fg);display:inline-block}
 .btn{border:1px solid var(--line);background:var(--surface);padding:7px 13px;border-radius:6px;cursor:pointer;font-weight:600;font-size:.88rem;white-space:nowrap}
 .btn:hover{border-color:var(--muted)}
 .btn.sm{padding:3px 9px;font-size:.8rem}
@@ -277,6 +279,9 @@ tr.click:hover td{background:var(--surface-2)}
 .termbox{display:grid;gap:10px;justify-items:center;text-align:center;padding:10px 0}.termbox .amt{font-family:var(--f-head);font-size:2.4rem;font-weight:700}.termbox .st{font-weight:600}
 .spin{width:28px;height:28px;border:3px solid var(--line);border-top-color:var(--accent);border-radius:50%;animation:spin 1s linear infinite}@keyframes spin{to{transform:rotate(360deg)}}
 .imp-prev{max-height:280px;overflow:auto;border:1px solid var(--line);border-radius:var(--r)}
+/* phones and tablets: no double-tap zoom on buttons, finger-sized targets, and 16px fields so iOS doesn't zoom in when one is tapped */
+button,[data-act],select,summary,label{touch-action:manipulation}
+@media (pointer:coarse){.btn{min-height:44px}.btn.sm{min-height:38px}.seg button{min-height:40px}input,select,textarea{font-size:16px}}
 </style>
 
 <style>[hidden]{display:none!important}html,body{margin:0}</style></head><body>
@@ -929,6 +934,8 @@ tr.click:hover td{background:var(--surface-2)}
             const cap = round2(paidOf(s) + amt - (+s.lateFee || 0) - extrasOf(s)), recent = charge(facFor(s), s.startAt, Math.max(s.startAt, t - 10 * M), s.validation);
             if (cd.fee > cap && cap >= recent - 0.005) { cd.feeQuoted = cd.fee; cd.fee = cap; }
           }
+          /* A staff member without manager rights can close a ticket only by collecting everything owed, so a token $1 can't be used to wave a car out. */
+          if (a.requireFull && !s.waived && round2((+cd.fee || 0) + extrasOf(s) + (+s.lateFee || 0) - paidOf(s) - amt) > 0.004) return { error: 'Only a manager or owner can close a ticket with money still owed. Collect the full amount, or ask a manager.' };
           Object.assign(data, cd); detail += ' · departed';
         }
         data.history = histAdd(s, { action: 'payment', by: a.by, detail });
@@ -943,6 +950,11 @@ tr.click:hover td{background:var(--surface-2)}
         if (now() - at > 15 * M && !a.allowBackdate) return { error: 'A departure more than 15 minutes ago needs a manager (it changes the fee).' };
         const data = closeData(s, at);
         const bal = Math.max(0, round2(data.fee + extrasOf(s) + (+s.lateFee || 0) - paidOf(s)));
+        /* Letting a car out with money still owed is a manager or owner decision, and it always needs a reason. */
+        if (bal > 0 && !s.waived) {
+          if (!a.allowUnpaid) return { error: 'Only a manager or owner can let a car out with money owed. Collect the payment, apply a validation code, or ask a manager.' };
+          if (!String(a.reason || '').trim()) return { error: 'Give a reason for letting this car out unpaid (it is kept in the audit trail).' };
+        }
         data.history = histAdd(s, { action: 'departed', by: a.by, detail: (a.reason ? a.reason + ' · ' : '') + (bal > 0 && !s.waived ? money(bal) + ' left unpaid' : 'nothing owed') + (Math.abs(at - now()) > M ? ' · time set to ' + fmtLocal(at, fac(s.facilityId)) : '') });
         return { ops: [{ type: 'update', coll: 'sessions', id: s.id, data }], balance: s.waived ? 0 : bal };
       },
@@ -1069,7 +1081,8 @@ tr.click:hover td{background:var(--surface-2)}
         const plates = String(a.plates || '').split(',').map(normPlate).filter(Boolean).slice(0, +plan.maxVehicles || 3);
         if (!name || !/.+@.+\..+/.test(email) || !plates.length) return { error: 'Add your name, email and at least one plate.' };
         if (L('permits').some(p => p.permitTypeId === plan.id && String(p.email || '').toLowerCase() === email && ['active', 'pending', 'waitlist', 'suspended'].includes(p.status) && !p.endAt)) return { error: 'You already have this monthly plan or are on its waitlist.' };
-        const full = +plan.quota && soldOf(plan) >= +plan.quota, number = String(10000 + Math.floor(Math.random() * 89999));
+        const full = +plan.quota && soldOf(plan) >= +plan.quota, number = newMonthlyNumber();
+        if (a.companyId) { const rm = accountRoom(a.companyId, plan.id, { adding: full ? 0 : 1 }); if (rm.error) return { error: rm.error }; const dup = plates.find(pl => permitsForPlate(pl).some(p => ['active', 'approved', 'pending', 'suspended'].includes(p.status) && (!p.endAt || p.endAt > now()))); if (dup) return { error: dup + ' is already on a monthly plan.' }; }
         const f = fac((plan.facilities || [])[0]) || L('facilities')[0], mb = monthBounds(now(), f);
         const first = full ? 0 : round2(+plan.price * (mb.end - now()) / (mb.end - mb.start));
         const data = { number, holder: name, email, phone: String(a.phone || ''), permitTypeId: plan.id, plates, status: full ? 'waitlist' : 'active', billing: a.companyId ? 'company' : 'card', companyId: a.companyId || null, companyName: a.companyName || '', accountId: a.accountId || null, createdAt: now(), startAt: full ? null : now(), endAt: null, paidThrough: full ? null : mb.end, source: a.source || 'portal', firstPaymentId: first > 0 && !a.companyId ? '__PAY__' : null };
@@ -1171,6 +1184,55 @@ tr.click:hover td{background:var(--surface-2)}
     }
     /* First, partial month: the plan price times the share of the month left. */
     const prorate = plan => { const mb = monthBounds(now(), fac((plan.facilities || [])[0]) || L('facilities')[0]); return round2(+plan.price * (mb.end - now()) / (mb.end - mb.start)); };
+
+    /* ---------- accounts: a company, building or garage that manages its own block of monthly parkers ----------
+       An account can be tied to locations, limited to certain plans and capped at a number of parkers. These checks run on the
+       server for the console, spreadsheet imports, the account link and the driver portal, and again in the pilot page. */
+    const HOLDS_SPACE = ['active', 'suspended', 'approved', 'pending'];
+    const holdsSpace = p => HOLDS_SPACE.includes(p.status) && (!p.endAt || p.endAt > now());
+    /* A monthly number nobody else has. extra: numbers already handed out in the same batch (not saved yet). */
+    function newMonthlyNumber(extra) { const have = new Set(L('permits').map(p => String(p.number))); let n, k = 0; do { n = String(k++ < 40 ? 10000 + Math.floor(Math.random() * 89999) : 1000000 + Math.floor(Math.random() * 8999999)); } while (have.has(n) || (extra && extra.has(n))); if (extra) extra.add(n); return n; }
+    function accountUsed(companyId, excludeId) { let n = 0; for (const p of L('permits')) if (p.companyId === companyId && p.id !== excludeId && holdsSpace(p)) n++; return n; }
+    /* Can this account take `adding` more parkers on this plan? o.used lets a caller that is adding many keep its own running count. */
+    function accountRoom(companyId, planId, o) {
+      o = o || {}; const co = L('companies').find(c => c.id === companyId); if (!co) return {};
+      const plan = ptype(planId), max = +co.maxParkers || 0, used = o.used != null ? o.used : accountUsed(companyId, o.exclude), adding = o.adding == null ? 1 : o.adding;
+      const ids = Array.isArray(co.planIds) ? co.planIds : [], locs = Array.isArray(co.facilityIds) ? co.facilityIds : [], names = list => list.map(i => (ptype(i) || fac(i) || {}).name).filter(Boolean).join(', ');
+      if (plan && ids.length && !ids.includes(plan.id)) return { error: co.name + ' isn’t set up for the ' + plan.name + ' plan. Its plans: ' + (names(ids) || 'none') + '.', used, max };
+      if (plan && locs.length && (plan.facilities || []).length && !(plan.facilities || []).some(f => locs.includes(f))) return { error: 'The ' + plan.name + ' plan isn’t at ' + co.name + '’s location (' + names(locs) + ').', used, max };
+      if (max && adding > 0 && used + adding > max) return { error: co.name + ' is at its limit of ' + max + ' parker' + (max === 1 ? '' : 's') + ' (' + used + ' in use). Raise the limit on the account to add more.', used, max };
+      return { used, max, left: max ? Math.max(0, max - used) : null };
+    }
+    /* Add many parkers to one account at once (a pasted list or spreadsheet). Pure: returns what would be saved, row by row.
+       rows: [{ name, email, phone, plates, plan? }]; a.planId is the plan for rows that don't name one. a.prorate puts the rest of this
+       month on the account's next bill. a.staff lets the office use plans that aren't sold online. */
+    function planAccountParkers(a) {
+      const co = L('companies').find(c => c.id === a.companyId); if (!co) return { error: 'Account not found.' };
+      const rows = Array.isArray(a.rows) ? a.rows.slice(0, 1000) : [], norm = x => String(x || '').trim().toLowerCase(), created = [], skipped = [], ops = [];
+      const defPlan = a.planId ? ptype(a.planId) : null, taken = new Map(), numbers = new Set(), sold = {}; let used = accountUsed(co.id);
+      for (const p of L('permits')) { numbers.add(String(p.number)); if (['active', 'approved', 'pending', 'suspended'].includes(p.status) && (!p.endAt || p.endAt > now())) (p.plates || []).forEach(pl => taken.set(normPlate(pl), p.number)); }
+      const nextNumber = () => { let n, k = 0; do { n = String(k++ < 40 ? 10000 + Math.floor(Math.random() * 89999) : 1000000 + Math.floor(Math.random() * 8999999)); } while (numbers.has(n)); numbers.add(n); return n; };
+      rows.forEach((r, i) => {
+        const line = i + 1, holder = String(r.name || r.holder || '').trim().slice(0, 80), plates = [...new Set(String(r.plates || r.plate || '').split(/[,;|\s]+/).map(normPlate).filter(Boolean))];
+        const key = r.plan || r.planId || r.type, plan = key ? L('permitTypes').find(t => t.id === key || norm(t.name) === norm(key)) : defPlan;
+        if (!holder) return skipped.push({ line, reason: 'No name' });
+        if (!plates.length) return skipped.push({ line, reason: 'No license plate' });
+        if (!plan) return skipped.push({ line, reason: key ? 'Unknown plan “' + key + '”' : 'No plan chosen' });
+        if (!a.staff && plan.active === false) return skipped.push({ line, reason: plan.name + ' isn’t open for sign-up' });
+        const dup = plates.find(pl => taken.has(pl)); if (dup) return skipped.push({ line, reason: dup + ' is already on monthly #' + taken.get(dup) });
+        if (sold[plan.id] == null) sold[plan.id] = +plan.quota ? soldOf(plan) : 0;
+        const full = +plan.quota && sold[plan.id] >= +plan.quota, room = accountRoom(co.id, plan.id, { used, adding: full ? 0 : 1 });
+        if (room.error) return skipped.push({ line, reason: room.error });
+        const f = fac((plan.facilities || [])[0]) || L('facilities')[0], mb = monthBounds(now(), f), email = norm(r.email).slice(0, 200), number = nextNumber();
+        const data = { number, holder, email: /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email) ? email : '', phone: String(r.phone || '').trim().slice(0, 30), permitTypeId: plan.id, plates: plates.slice(0, +plan.maxVehicles || 3), companyId: co.id, companyName: co.name, billing: 'company', accountId: null,
+          status: full ? 'waitlist' : 'active', createdAt: now(), startAt: full ? null : now(), endAt: null, paidThrough: full ? null : mb.end, source: a.source || 'account', notes: String(r.notes || '').slice(0, 300) };
+        if (!full && a.prorate) data.prorateDue = round2(+plan.price * (mb.end - now()) / (mb.end - mb.start));
+        plates.forEach(pl => taken.set(pl, number)); if (full) sold[plan.id]++; else { sold[plan.id]++; used++; }
+        created.push({ line, holder, plates: data.plates, plan: plan.name, status: data.status, email: data.email });
+        ops.push({ type: 'set', coll: 'permits', id: uid('p'), data });
+      });
+      return { created, skipped, ops };
+    }
     const sessionByToken = tok => L('sessions').find(s => tok && s.extendToken === tok && !s.endAt);
 
     function lookup(plate) {
@@ -1189,7 +1251,7 @@ tr.click:hover td{background:var(--surface-2)}
       };
     }
 
-    return { ROLES, ROLE_NAMES, METHODS, can, canonRole, ticketOf, ticketNo, snapRates, facFor, histAdd, endOfDate, ticketBill, extrasOf, freeKind, validPermitFor, vipForPlate, sessionsForCode, codeOccupancy, arAging, vehicleProfile, validationText, staleHours, TICKET, prorate, priceDetail, rateSummary, taxOf, specialQualifies, monthBounds, planMonthlyDue, sessionByToken, needsReview, cfg, plateDebt, isHot, hotList, planCollections, resAvailability, reservationFor, activeReservation, planNoShows, resActive, resPlates, M, H, D, normPlate, canon, uid, round2, money, sum, now, fac, ptype, tenant, camera, tzOf, dayStart, nextDayStart, charge, paidOf, sessionFee, balanceOf, isLive, onSiteSessions, occupancy, permitValid, permitCovers, permitsForPlate, memberForPlate, soldOf, unpaidSessions, exitStatus, findLive, planRead, checkPlate, findValidation, planApplyValidation, sessionsForTenant, concurrency, tenantDays, PORTAL, lookup, quote, liveForPlate };
+    return { newMonthlyNumber, accountRoom, accountUsed, planAccountParkers, ROLES, ROLE_NAMES, METHODS, can, canonRole, ticketOf, ticketNo, snapRates, facFor, histAdd, endOfDate, ticketBill, extrasOf, freeKind, validPermitFor, vipForPlate, sessionsForCode, codeOccupancy, arAging, vehicleProfile, validationText, staleHours, TICKET, prorate, priceDetail, rateSummary, taxOf, specialQualifies, monthBounds, planMonthlyDue, sessionByToken, needsReview, cfg, plateDebt, isHot, hotList, planCollections, resAvailability, reservationFor, activeReservation, planNoShows, resActive, resPlates, M, H, D, normPlate, canon, uid, round2, money, sum, now, fac, ptype, tenant, camera, tzOf, dayStart, nextDayStart, charge, paidOf, sessionFee, balanceOf, isLive, onSiteSessions, occupancy, permitValid, permitCovers, permitsForPlate, memberForPlate, soldOf, unpaidSessions, exitStatus, findLive, planRead, checkPlate, findValidation, planApplyValidation, sessionsForTenant, concurrency, tenantDays, PORTAL, lookup, quote, liveForPlate };
   }
   Rules.normPlate = normPlate; Rules.ROLES = ROLES; Rules.ROLE_NAMES = ROLE_NAMES; Rules.can = can; Rules.canonRole = canonRole; Rules.METHODS = METHODS;
   if (typeof module !== 'undefined' && module.exports) module.exports = Rules; else root.ParkRules = Rules;
@@ -1318,7 +1380,7 @@ tr.click:hover td{background:var(--surface-2)}
 window.PARKOPS_HOSTED = (function () {
   const COLLS = ['facilities', 'permitTypes', 'permits', 'sessions', 'citations', 'validations', 'members', 'tenants', 'cameras', 'reservations', 'companies', 'invoices', 'vips', 'ratings'];
   const data = {}; COLLS.forEach(c => { data[c] = new Map(); });
-  let config = null, feed = [], role = 'public', webhookBase = '', payments = null, account = null, user = null, sms = null, terminal = null, email = false;
+  let config = null, feed = [], role = 'public', webhookBase = '', payments = null, account = null, user = null, sms = null, terminal = null, email = false, screenSince = null, scan = null;
   const subs = {}; const docSubs = { 'settings/config': [], 'feeds/lpr': [] };
   const fire = c => (subs[c] || []).forEach(fn => fn());
   const fireDoc = k => (docSubs[k] || []).forEach(fn => fn());
@@ -1374,12 +1436,12 @@ window.PARKOPS_HOSTED = (function () {
     es.onopen = () => { const el = document.querySelector('#live'); if (el) { el.className = 'live on'; el.lastElementChild.textContent = 'Live'; } };
   }
   return {
-    get webhookBase() { return webhookBase; }, get terminal() { return terminal; }, get email() { return email; },
+    get webhookBase() { return webhookBase; }, get terminal() { return terminal; }, get email() { return email; }, get screenSince() { return screenSince; }, get scan() { return scan; },
     get payments() { return payments; }, get account() { return account; }, set account(a) { account = a; }, get user() { return user; }, get role() { return role; }, get sms() { return sms; },
     api,
     async init() {
       const st = await api('GET', '/api/state');
-      role = st.role; webhookBase = st.webhookBase; config = st.config; feed = st.feed || []; payments = st.payments; account = st.account; user = st.user; sms = st.sms || null; terminal = st.terminal || null; email = !!st.email;
+      role = st.role; webhookBase = st.webhookBase; config = st.config; feed = st.feed || []; payments = st.payments; account = st.account; user = st.user; sms = st.sms || null; terminal = st.terminal || null; email = !!st.email; screenSince = st.screenSince || null; scan = st.scan || null;
       COLLS.forEach(c => (st[c] || []).forEach(d => data[c].set(d.id, strip(d))));
       stream();
       /* Which console views a role gets: owners, managers and attendants work tickets and enforcement; accountants and
@@ -1443,13 +1505,13 @@ const can=p=>S.perms.has(p);
 const setRole=r=>{S.role=ParkRules.canonRole(r||'viewer');S.perms=new Set(ParkRules.ROLES[S.role]||[])};
 const actorName=()=>(HOSTED&&HOSTED.user&&HOSTED.user.name)||store.get('officer')||'Staff';
 /* Which permission each button or form needs. The server checks the same table; this only greys things out. */
-const ACT_PERM={editFacility:'facilities',editRates:'facilities',makeSign:'facilities',recount:'facilities',editTenant:'validations',editValidation:'validations',toggleValidation:'validations',editType:'monthly',issuePermit:'monthly',approvePermit:'monthly',denyPermit:'monthly',reinstatePermit:'monthly',officePaid:'monthly',endMonthly:'monthly',editPermit:'monthly',editCompany:'monthly',sendCompanyLink:'monthly',runBilling:'monthly',invoicePaid:'monthly',importMonthly:'import',editCamera:'cameras',citePaid:'citations.decide',citeVoid:'citations.decide',appealDecide:'citations.decide',citeSession:'citations',addViolation:'settings',clearSamples:'settings',refreshSamples:'settings',pruneSessions:'settings',removeMember:'monthly',staffCancelRes:'reservations',refund:'refunds',addUser:'users',editUser:'users',backupNow:'settings',markSessionPaid:'tickets',waiveSession:'tickets.adjust',closeSession:'tickets',validateSession:'tickets',closeMissed:'tickets.adjust',confirmMatch:'tickets.adjust',rejectMatch:'tickets.adjust',missedBill:'tickets.adjust',missedFree:'tickets.adjust'};
+const ACT_PERM={editFacility:'facilities',editRates:'facilities',makeSign:'facilities',recount:'facilities',editTenant:'validations',editValidation:'validations',toggleValidation:'validations',editType:'monthly',issuePermit:'monthly',approvePermit:'monthly',denyPermit:'monthly',reinstatePermit:'monthly',officePaid:'monthly',endMonthly:'monthly',editPermit:'monthly',editCompany:'monthly',acctAdd:'monthly',acctBulk:'monthly',sendCompanyLink:'monthly',runBilling:'monthly',invoicePaid:'monthly',importMonthly:'import',editCamera:'cameras',citePaid:'citations.decide',citeVoid:'citations.decide',appealDecide:'citations.decide',citeSession:'citations',addViolation:'settings',clearSamples:'settings',refreshSamples:'settings',pruneSessions:'settings',removeMember:'monthly',staffCancelRes:'reservations',refund:'refunds',addUser:'users',editUser:'users',backupNow:'settings',markSessionPaid:'tickets',waiveSession:'tickets.adjust',closeSession:'tickets',validateSession:'tickets',closeMissed:'tickets.adjust',confirmMatch:'tickets.adjust',rejectMatch:'tickets.adjust',missedBill:'tickets.adjust',missedFree:'tickets.adjust'};
 const FORM_PERM={settings:'settings',violations:'settings',lprRead:'cameras',cite:'citations'};
 /* One entry point for every ticket action, in both builds. Hosted: the server runs the planner and checks the role. */
 async function ticketAction(id,action,args,okMsg){
   args=Object.assign({by:actorName()},args||{});
   if(HOSTED){try{const r=await HOSTED.api('POST',action==='create'?'/api/tickets':'/api/tickets/'+encodeURIComponent(id)+'/'+action,args);if(okMsg)toast(typeof okMsg==='function'?okMsg(r):okMsg);return r}catch(e){toast(e.message,true);return {error:e.message}}}
-  args.allowBackdate=can('tickets.adjust');const s=id?byId('sessions',id):null;const r=action==='create'?R.TICKET.create(args):R.TICKET[action](s,args);
+  args.allowBackdate=can('tickets.adjust');args.allowUnpaid=can('tickets.adjust');args.requireFull=!can('tickets.adjust');const s=id?byId('sessions',id):null;const r=action==='create'?R.TICKET.create(args):R.TICKET[action](s,args);
   if(r.error){toast(r.error,true);return r}
   applyLocal(r.ops);const ok=await write(db=>execOps(db,r.ops));if(!ok)return {error:'Couldn’t save.'};
   if(okMsg)toast(typeof okMsg==='function'?okMsg(r):okMsg);return r;
@@ -1499,6 +1561,7 @@ async function saveFile(name,text){
   if(!d){toast('Downloads aren’t available in this view.',true);return}
   try{await d.save({filename:name,data:new Blob([text],{type:'text/csv'})})}catch(e){if(e&&e.code!=='declined')toast('Couldn’t save the file: '+(e.message||e.code),true)}
 }
+const safeCell=v=>/^[=+\-@]/.test(String(v||''))?"'"+v:v;
 const csv=rows=>rows.map(r=>r.map(v=>{v=String(v??'');return /[",\n]/.test(v)?'"'+v.replace(/"/g,'""')+'"':v}).join(',')).join('\n');
 
 /* ============ boot ============ */
@@ -1537,7 +1600,7 @@ function render(){
   document.querySelectorAll('.roles button').forEach(b=>{b.hidden=!(S.roles||[]).includes(b.dataset.role);b.setAttribute('aria-pressed',b.dataset.role===UI.role)});
   $('#campusName').textContent=campusName();$('#brandSub').textContent=canEditOps()?(HOSTED?ParkRules.ROLE_NAMES[S.role]||'Parking operations':'Parking operations'):'Parking services';
   applyBrand();
-  if(TAB_PERM[UI.tab]&&!can(TAB_PERM[UI.tab]))UI.tab='overview';
+  if(!tabAllowed(UI.tab))UI.tab='overview';
   renderTabs();
   const main=$('#main');const snap=snapForm(main);
   let html='';
@@ -1556,12 +1619,14 @@ function afterRender(){updateQuote();updateTypeInfo();
 }
 function applyBrand(){const c=S.config||{};const r=document.documentElement.style;if(c.brandColor&&/^#[0-9a-f]{6}$/i.test(c.brandColor))r.setProperty('--accent',c.brandColor);else r.removeProperty('--accent');if(c.brandStripe&&/^#[0-9a-f]{6}$/i.test(c.brandStripe))r.setProperty('--stripe',c.brandStripe);else r.removeProperty('--stripe')}
 const TABS=[['overview','Overview'],['selfparking','Self-parking'],['activity','Occupancy'],['review','Plate review'],['tenants','Validations'],['valet','Valet'],['permits','Monthly'],['facilities','Locations'],['citations','Notices'],['lpr','Cameras'],['reports','Reports'],['settings','Settings']];
-if(HOSTED){TABS.splice(7,0,['reservations','Reservations']);TABS.splice(11,0,['payments','Payments'])}
-const TAB_PERM={settings:'settings',reports:'reports',payments:'payments'};
+if(HOSTED){TABS.splice(7,0,['reservations','Reservations']);TABS.splice(11,0,['payments','Payments'],['daily','By day'],['history','History'])}
+const TAB_PERM={settings:'settings',reports:'reports',payments:'payments',history:['tickets','reports'],daily:'reports'};
+/* A tab needs one permission, or any one of a list. */
+const tabAllowed=k=>!TAB_PERM[k]||[].concat(TAB_PERM[k]).some(x=>can(x));
 function renderTabs(){
   const t=$('#tabs');t.hidden=UI.role!=='ops';if(t.hidden)return;
   const counts={permits:S.permits.filter(p=>p.status==='pending'||p.status==='waitlist'||p.status==='suspended').length,citations:S.citations.filter(c=>c.status==='appeal').length,selfparking:R.unpaidSessions().length,review:reviewList().length,valet:S.sessions.filter(s=>s.valet&&!s.endAt&&s.valet.status==='requested').length};
-  t.innerHTML=TABS.filter(([k])=>!TAB_PERM[k]||can(TAB_PERM[k])).map(([k,l])=>`<button role="tab" data-tab="${k}" aria-selected="${UI.tab===k}">${l}${counts[k]?`<span class="badge">${counts[k]}</span>`:''}</button>`).join('');
+  t.innerHTML=TABS.filter(([k])=>tabAllowed(k)).map(([k,l])=>`<button role="tab" data-tab="${k}" aria-selected="${UI.tab===k}">${l}${counts[k]?`<span class="badge">${counts[k]}</span>`:''}</button>`).join('');
 }
 
 /* ============ charts ============ */
@@ -1640,6 +1705,9 @@ function attentionItems(){
   S.tenants.forEach(t=>{const d=R.tenantDays(t,1)[0];if(d&&d.over>0)it.push({sev:'bad',t:`${t.name} valet is ${d.over} over its ${t.allotment}-space allotment today (peak ${d.peak})`,go:'tenants',tenant:t.id})});
   S.facilities.forEach(f=>{const p=R.occupancy(f)/(+f.capacity||1);if(p>=.9)it.push({sev:'bad',t:`${f.name} is ${Math.round(p*100)}% full`,go:'activity',fac:f.id})});
   if(wl.length)it.push({sev:'info',t:`${wl.length} driver${wl.length>1?'s':''} on a monthly waitlist`,go:'permits',f:'waitlist'});
+  /* Availability: spaces that have opened up for people who are waiting. */
+  if(wl.length){const waitBy={},usedBy={};wl.forEach(p=>{waitBy[p.permitTypeId]=(waitBy[p.permitTypeId]||0)+1});S.permits.forEach(p=>{if(p.status!=='waitlist'&&holdsSpace(p))usedBy[p.permitTypeId]=(usedBy[p.permitTypeId]||0)+1});
+    S.permitTypes.forEach(t=>{const q=+t.quota||0,w=waitBy[t.id]||0,free=q-(usedBy[t.id]||0);if(q&&w&&free>0)it.push({sev:'warn',t:`${t.name}: ${free} space${free>1?'s are':' is'} free and ${w} ${w>1?'people are':'person is'} waiting. Approve them from the waitlist.`,go:'permits',f:'waitlist'})})}
   return it;
 }
 function vOverview(){
@@ -1912,6 +1980,7 @@ const mStatus=p=>p.status==='active'&&p.endAt&&p.endAt<now()?'ended':p.status;
 const permitPill=p=>{const st=mStatus(p);const [c,l]=MSTATUS[st]||['',st];return `<span class="pill ${c}">${l}${st==='active'&&p.endAt?' · ends '+fmtDate(p.endAt-1):''}</span>`};
 const billingLabel=p=>p.companyId?'Company: '+((byId('companies',p.companyId)||{}).name||p.companyName||''):p.billing==='office'?'Billed by the office':p.accountId?'Card on file (driver account)':'Not linked to billing';
 function vPermits(){
+  if(UI.acct&&byId('companies',UI.acct))return vAccount(byId('companies',UI.acct));
   const q=UI.permitQ.trim().toLowerCase();const qp=normPlate(q);
   let rows=S.permits.filter(p=>{const st=mStatus(p);if(UI.permitStatus==='pastdue'){if(!(p.pastDueSince||st==='suspended'))return false}else if(UI.permitStatus!=='all'&&st!==UI.permitStatus)return false;
     if(!q)return true;return (p.holder||'').toLowerCase().includes(q)||(p.email||'').toLowerCase().includes(q)||(p.companyName||'').toLowerCase().includes(q)||String(p.number).toLowerCase().includes(q)||(qp&&(p.plates||[]).some(x=>normPlate(x).includes(qp)))});
@@ -1921,7 +1990,9 @@ function vPermits(){
   const active=S.permits.filter(p=>p.status==='active'&&(!p.endAt||p.endAt>now()));
   const mrr=sum(active,p=>{const t=typeById(p.permitTypeId);return t?+t.price:0});
   const tz=(S.config&&S.config.timeZone)||'America/Chicago';
-  return `<div class="pagehead"><div><h1>Monthly parking</h1><p>Plans, monthly parkers and company accounts. Cards are billed on the 1st; companies can pay by card or Square invoice.</p></div><button class="btn" data-act="importMonthly">Import CSV</button><button class="btn" data-act="editType">New plan</button><button class="btn pri" data-act="issuePermit">Add monthly parker</button></div>
+  const pk=UI.permitStatus+'|'+q;if(UI.permitKey!==pk){UI.permitKey=pk;UI.permitPage=0}
+  const PAGE=100,pages=Math.max(1,Math.ceil(rows.length/PAGE));UI.permitPage=Math.min(UI.permitPage||0,pages-1);const total=rows.length;rows=rows.slice(UI.permitPage*PAGE,(UI.permitPage+1)*PAGE);
+  return `<div class="pagehead"><div><h1>Monthly parking</h1><p>Plans, monthly parkers and accounts for companies, buildings and garages. Cards are billed on the 1st; accounts can pay by card or Square invoice.</p></div><button class="btn" data-act="importMonthly">Import CSV</button><button class="btn" data-act="editType">New plan</button><button class="btn pri" data-act="issuePermit">Add monthly parker</button></div>
   <div class="kpis"><div class="kpi"><small>Active monthly parkers</small><b>${active.length}</b><span>${S.companies.length} compan${S.companies.length===1?'y':'ies'}</span></div><div class="kpi"><small>Monthly recurring</small><b>${money0(mrr)}</b><span>Before tax</span></div>
     <div class="kpi ${cnt('pastdue')?'alert':''}"><small>Past due or suspended</small><b>${cnt('pastdue')}</b><span>${S.permits.filter(p=>p.status==='suspended').length} suspended</span></div><div class="kpi"><small>Waitlist</small><b>${cnt('waitlist')}</b><span>Approve when a spot opens</span></div></div>
   <section class="panel"><div class="panel-h"><h2>Plans</h2><span class="muted" style="font-size:.84rem">Sold includes waitlisted-then-approved and suspended parkers</span></div>
@@ -1940,37 +2011,79 @@ function vPermits(){
     ${st==='suspended'?`<button class="btn sm" data-act="reinstatePermit" data-id="${p.id}">Reinstate</button>`:''}
     ${p.billing==='office'&&(st==='active'||st==='suspended')?`<button class="btn sm ok" data-act="officePaid" data-id="${p.id}">Record payment</button>`:''}
     ${st==='active'&&!p.endAt?`<button class="btn sm" data-act="endMonthly" data-id="${p.id}">Cancel</button>`:''}
-    <button class="btn sm" data-act="editPermit" data-id="${p.id}">Edit</button></div></td></tr>`}).join('')}</tbody></table></div>`:'<div class="empty">No monthly parkers match.</div>'}</section>
+    <button class="btn sm" data-act="editPermit" data-id="${p.id}">Edit</button></div></td></tr>`}).join('')}</tbody></table></div>${pager('permitPage',UI.permitPage,PAGE,total)}`:'<div class="empty">No monthly parkers match.</div>'}</section>
   ${vCompanies()}`;
 }
+/* A small pager for long tables: "1–100 of 4,812", earlier and later. key is the UI field that holds the page number. */
+function pager(key,page,size,total){
+  if(total<=size)return '';const from=page*size+1,to=Math.min(total,(page+1)*size);
+  return `<div class="panel-b row" style="align-items:center;gap:8px"><span class="muted" style="font-size:.84rem">${from.toLocaleString()}–${to.toLocaleString()} of ${total.toLocaleString()}</span><button class="btn sm" data-act="pagePrev" data-k="${key}" ${page<=0?'disabled':''}>‹ Earlier</button><button class="btn sm" data-act="pageNext" data-k="${key}" ${to>=total?'disabled':''}>Later ›</button></div>`;
+}
+const CO_HOLD=['active','suspended','approved','pending'];
+const holdsSpace=p=>CO_HOLD.includes(p.status)&&(!p.endAt||p.endAt>now());
 function vCompanies(){
   const cs=[...S.companies].sort((a,b)=>a.name.localeCompare(b.name));
   const invs=[...S.invoices].sort((a,b)=>(b.createdAt||0)-(a.createdAt||0)).slice(0,40);
   const ipill=st=>`<span class="pill ${({PAID:'ok',UNPAID:'warn',SCHEDULED:'info',PARTIALLY_PAID:'warn',CANCELED:'',FAILED:'bad'})[st]||''}">${esc(String(st||'').replace('_',' ').toLowerCase())}</span>`;
-  return `<section class="panel"><div class="panel-h"><h2>Companies</h2><div class="row">${HOSTED&&canEditOps()?'<button class="btn sm" data-act="runBilling">Run billing now</button>':''}<button class="btn sm pri" data-act="editCompany">Add company</button></div></div>
-  ${cs.length?`<div class="tbl-wrap"><table><thead><tr><th>Company</th><th>Contact</th><th>Billing</th><th class="r">Parkers</th><th class="r">Monthly</th><th></th></tr></thead><tbody>${cs.map(c=>{const ps=S.permits.filter(p=>p.companyId===c.id&&['active','suspended'].includes(p.status)&&(!p.endAt||p.endAt>now()));
-    return `<tr><td><b>${esc(c.name)}</b></td><td>${esc(c.contactName||'')}<span class="sub">${esc(c.email||'')}${c.phone?' · '+esc(c.phone):''}</span></td><td>${c.billing==='invoice'?'Square invoice':'Company card'}${c.billing==='card'?`<span class="sub">${c.card?esc(c.card.brand||'Card')+' ending '+esc(c.card.last4):'No card yet'}</span>`:`<span class="sub">Due ${(S.config&&S.config.invoiceDueDays)||5} days after the 1st</span>`}</td>
-    <td class="r num">${ps.length}</td><td class="r num">${money(sum(ps,p=>(typeById(p.permitTypeId)||{}).price))}</td>
-    <td><div class="acts">${HOSTED&&c.portalToken?`<button class="btn sm" data-act="copy" data-v="${esc(HOSTED.webhookBase+'/?company='+c.portalToken)}">Copy portal link</button><button class="btn sm" data-act="sendCompanyLink" data-id="${c.id}">Email link</button>`:''}<button class="btn sm" data-act="editCompany" data-id="${c.id}">Edit</button></div></td></tr>`}).join('')}</tbody></table></div>`:'<div class="empty">No companies yet. Add downtown employers that pay for their employees’ parking; they get a private link to add and remove employees.</div>'}</section>
+  const used={},waiting={},monthly={};S.permits.forEach(p=>{if(!p.companyId)return;if(holdsSpace(p)){used[p.companyId]=(used[p.companyId]||0)+1;if(['active','suspended'].includes(p.status))monthly[p.companyId]=(monthly[p.companyId]||0)+(+(typeById(p.permitTypeId)||{}).price||0)}else if(p.status==='waitlist')waiting[p.companyId]=(waiting[p.companyId]||0)+1});
+  const q=(UI.coQ||'').trim().toLowerCase(),shown=q?cs.filter(c=>(c.name||'').toLowerCase().includes(q)||(c.contactName||'').toLowerCase().includes(q)||(c.email||'').toLowerCase().includes(q)):cs;
+  const pg=Math.min(UI.coPage||0,Math.max(0,Math.ceil(shown.length/50)-1));
+  return `<section class="panel"><div class="panel-h"><h2>Accounts</h2><div class="row">${cs.length>8?`<input id="coQ" type="search" placeholder="Find an account" value="${esc(UI.coQ||'')}" data-fresh="1" style="width:200px">`:''}${HOSTED&&canEditOps()?'<button class="btn sm" data-act="runBilling">Run billing now</button>':''}<button class="btn sm pri" data-act="editCompany">Add account</button></div></div>
+  ${cs.length?`<div class="tbl-wrap"><table><thead><tr><th>Account</th><th>Location</th><th>Contact</th><th>Billing</th><th class="r">Parkers</th><th class="r">Monthly</th><th></th></tr></thead><tbody>${shown.slice(pg*50,pg*50+50).map(c=>{const n=used[c.id]||0,max=+c.maxParkers||0,fs=(c.facilityIds||[]).map(facById).filter(Boolean);
+    return `<tr><td><a href="#" data-act="openAccount" data-id="${c.id}"><b>${esc(c.name)}</b></a>${waiting[c.id]?`<span class="sub">${waiting[c.id]} on the waitlist</span>`:''}</td><td>${fs.length?fs.map(f=>esc(f.name)).join(', '):'<span class="muted">Any</span>'}</td><td>${esc(c.contactName||'')}<span class="sub">${esc(c.email||'')}${c.phone?' · '+esc(c.phone):''}</span></td><td>${c.billing==='invoice'?'Square invoice':'Company card'}${c.billing==='card'?`<span class="sub">${c.card?esc(c.card.brand||'Card')+' ending '+esc(c.card.last4):'No card yet'}</span>`:`<span class="sub">Due ${(S.config&&S.config.invoiceDueDays)||5} days after the 1st</span>`}</td>
+    <td class="r num">${n.toLocaleString()}${max?` / ${max.toLocaleString()}`:''}${max&&n>=max?'<span class="sub" style="color:var(--bad)">Full</span>':''}</td><td class="r num">${money(monthly[c.id]||0)}</td>
+    <td><div class="acts"><button class="btn sm pri" data-act="openAccount" data-id="${c.id}">Open</button><button class="btn sm" data-act="editCompany" data-id="${c.id}">Edit</button></div></td></tr>`}).join('')}</tbody></table></div>${pager('coPage',pg,50,shown.length)}`:'<div class="empty">No accounts yet. Add a company, building or garage that parks a group of people. You add their parkers here, or send them a private link so they add and remove their own.</div>'}</section>
   ${invs.length?`<section class="panel"><div class="panel-h"><h2>Company invoices</h2><span class="muted" style="font-size:.84rem">Sent through Square on the 1st. Past-due invoices suspend that company’s parkers after ${(S.config&&S.config.monthlyGraceDays)||5} days.</span></div>
   <div class="tbl-wrap"><table><thead><tr><th>Company</th><th>Month</th><th class="r">Amount</th><th>Due</th><th>Status</th><th></th></tr></thead><tbody>${invs.map(i=>`<tr><td>${esc(i.companyName||'')}</td><td class="num">${esc(i.period)}</td><td class="r num">${money(i.amount)}${i.tax?`<span class="sub">incl. ${money(i.tax)} tax</span>`:''}</td><td class="num">${esc(i.dueDate||'')}</td><td>${ipill(i.status)}${i.suspended?'<span class="sub">Parkers suspended</span>':''}</td>
     <td><div class="acts">${i.publicUrl?`<a class="btn sm" href="${esc(i.publicUrl)}" target="_blank" rel="noopener">Open</a>`:''}${i.status!=='PAID'&&HOSTED?`<button class="btn sm ok" data-act="invoicePaid" data-id="${i.id}">Mark paid</button>`:''}</div></td></tr>`).join('')}</tbody></table></div></section>`:''}`;
 }
+
+/* One account: its limit, its parkers, and everything you do to them. */
+function vAccount(c){
+  const q=(UI.acctQ||'').trim().toLowerCase(),qp=normPlate(q),flt=UI.acctFilter||'current',tz=(S.config&&S.config.timeZone)||'America/Chicago';
+  const all=S.permits.filter(p=>p.companyId===c.id),cur=all.filter(holdsSpace),wait=all.filter(p=>p.status==='waitlist'),gone=all.filter(p=>!holdsSpace(p)&&p.status!=='waitlist');
+  let rows=flt==='waitlist'?wait:flt==='ended'?gone:cur;
+  if(q)rows=rows.filter(p=>(p.holder||'').toLowerCase().includes(q)||(p.email||'').toLowerCase().includes(q)||String(p.number).toLowerCase().includes(q)||(qp&&(p.plates||[]).some(x=>normPlate(x).includes(qp))));
+  rows=rows.slice().sort((a,b)=>(a.holder||'').localeCompare(b.holder||''));
+  const key=c.id+'|'+flt+'|'+q;if(UI.acctKey!==key){UI.acctKey=key;UI.acctPage=0}
+  const PAGE=100,pg=Math.min(UI.acctPage||0,Math.max(0,Math.ceil(rows.length/PAGE)-1)),total=rows.length;rows=rows.slice(pg*PAGE,pg*PAGE+PAGE);
+  const max=+c.maxParkers||0,used=cur.length,left=max?Math.max(0,max-used):null,pct=max?Math.min(100,used/max*100):0;
+  const monthly=sum(cur.filter(p=>['active','suspended'].includes(p.status)),p=>+(typeById(p.permitTypeId)||{}).price||0);
+  const fs=(c.facilityIds||[]).map(facById).filter(Boolean),plans=(c.planIds||[]).map(id=>typeById(id)).filter(Boolean);
+  const seg=(k,l,n)=>`<button data-act="acctFilter" data-v="${k}" aria-pressed="${flt===k}">${l} <span class="muted">${n.toLocaleString()}</span></button>`;
+  return `<div class="pagehead"><div><button class="btn sm" data-act="closeAccount">‹ All monthly parking</button><h1 style="margin-top:10px">${esc(c.name)}</h1><p>${[c.contactName,c.email,c.phone].filter(Boolean).map(esc).join(' · ')||'No contact yet'} · ${c.billing==='invoice'?'Square invoice each month':'Card on file, charged on the 1st'}${fs.length?' · '+fs.map(f=>esc(f.name)).join(', '):''}</p></div>
+    <div class="row"><button class="btn" data-act="editCompany" data-id="${c.id}">Edit account</button>${HOSTED&&c.portalToken?`<button class="btn" data-act="copy" data-v="${esc(HOSTED.webhookBase+'/?company='+c.portalToken)}">Copy their link</button><button class="btn" data-act="sendCompanyLink" data-id="${c.id}">Email their link</button>`:''}<button class="btn" data-act="acctExport" data-id="${c.id}" data-perm="export">Export (CSV)</button><button class="btn" data-act="acctBulk" data-id="${c.id}">Add many</button><button class="btn pri" data-act="acctAdd" data-id="${c.id}">Add a parker</button></div></div>
+  <div class="kpis"><div class="kpi ${max&&used>=max?'alert':''}"><small>Parkers</small><b>${used.toLocaleString()}${max?` <span style="font-size:1rem;font-weight:500" class="muted">of ${max.toLocaleString()}</span>`:''}</b><span>${max?(left?`${left.toLocaleString()} space${left===1?'':'s'} left`:'Full: raise the limit to add more'):'No limit set'}</span></div>
+    <div class="kpi"><small>Monthly</small><b>${money0(monthly)}</b><span>Before tax</span></div><div class="kpi ${wait.length?'alert':''}"><small>Waitlist</small><b>${wait.length.toLocaleString()}</b><span>${wait.length?'Plan is full: approve when a spot opens':'Nobody waiting'}</span></div>
+    <div class="kpi"><small>Plans</small><b style="font-size:1.1rem;line-height:1.3">${plans.length?plans.map(t=>esc(t.name)).join(', '):'Any plan at its location'}</b><span>${HOSTED&&c.portalToken?'Their link only shows these':'Chosen when adding'}</span></div></div>
+  ${max?`<div class="bar ${pct>=100?'bad':pct>=85?'warn':''}" style="margin:-4px 0 4px"><i style="width:${pct}%"></i></div>`:''}
+  ${c.notes?`<div class="callout"><b>Notes</b> ${esc(c.notes)}</div>`:''}
+  <section class="panel"><div class="panel-h"><h2>Parkers</h2><div class="filters"><input id="acctQ" type="search" placeholder="Search name, #, plate" value="${esc(UI.acctQ||'')}" data-fresh="1"><div class="seg">${seg('current','Current',cur.length)}${seg('waitlist','Waitlist',wait.length)}${seg('ended','Ended',gone.length)}</div></div></div>
+  ${rows.length?`<div class="tbl-wrap"><table><thead><tr><th>#</th><th>Parker</th><th>Plan</th><th>Plates</th><th>Paid through</th><th>Status</th><th></th></tr></thead><tbody>${rows.map(p=>{const t=typeById(p.permitTypeId),st=mStatus(p);
+    return `<tr><td class="mono">#${esc(p.number)}</td><td><b>${esc(p.holder)}</b><span class="sub">${esc(p.email||'')}${p.phone?' · '+esc(p.phone):''}</span></td><td>${esc(t?t.name:'Unknown plan')}<span class="sub">${t?money(t.price)+'/mo':''}</span></td><td><div class="plates">${(p.plates||[]).map(plateChip).join('')}</div></td><td class="num">${p.paidThrough?fmtDate(p.paidThrough-1,tz):'—'}${+p.prorateDue?`<span class="sub">${money(p.prorateDue)} on next bill</span>`:''}</td><td>${permitPill(p)}</td>
+    <td><div class="acts">${st==='waitlist'||st==='pending'?`<button class="btn sm ok" data-act="approvePermit" data-id="${p.id}">Approve</button>`:''}${st==='suspended'?`<button class="btn sm" data-act="reinstatePermit" data-id="${p.id}">Reinstate</button>`:''}${st==='active'&&!p.endAt?`<button class="btn sm" data-act="endMonthly" data-id="${p.id}">Remove</button>`:''}${st==='waitlist'?`<button class="btn sm" data-act="denyPermit" data-id="${p.id}">Remove</button>`:''}<button class="btn sm" data-act="editPermit" data-id="${p.id}">Edit</button></div></td></tr>`}).join('')}</tbody></table></div>${pager('acctPage',pg,PAGE,total)}`:`<div class="empty">${q?'No parkers match.':flt==='current'?'No parkers on this account yet. Add them one at a time, or paste a list.':'Nothing here.'}</div>`}</section>`;
+}
 function companyForm(c){
   c=c||{};const isNew=!c.id;
-  openForm({title:isNew?'Add company':'Edit '+c.name,submit:isNew?'Add company':'Save changes',fields:[
-    {id:'name',label:'Company name',value:c.name,required:true},
-    {id:'contactName',label:'Parking contact',value:c.contactName},
-    {id:'email',label:'Contact email (invoices and receipts)',type:'email',value:c.email,required:true},
+  openForm({title:isNew?'Add account':'Edit '+c.name,submit:isNew?'Add account':'Save changes',fields:[
+    {id:'name',label:'Account name',value:c.name,required:true,help:'A company, building or garage, e.g. “Tower One tenants”.'},
+    {id:'contactName',label:'Contact',value:c.contactName},
+    {id:'email',label:'Contact email (invoices, receipts and their link)',type:'email',value:c.email,required:true},
     {id:'phone',label:'Contact phone',type:'tel',value:c.phone},
-    {id:'billing',label:'How the company pays',type:'select',options:[['invoice','Square invoice each month (card or bank transfer)'],['card','Company card on file, charged on the 1st']],value:c.billing||'invoice'},
-  ],extra:isNew?'':`<button type="button" class="btn danger" data-dlg="delete">Delete company</button>`,
-  onExtra:async()=>{if(S.permits.some(p=>p.companyId===c.id&&['active','suspended','waitlist','approved'].includes(p.status)&&(!p.endAt||p.endAt>now()))){toast('Cancel this company’s monthly parkers first.',true);return false}return write(db=>col(db,'companies').doc(c.id).delete(),'Company deleted')},
-  onSubmit:v=>{const data={name:v.name.trim(),contactName:v.contactName.trim(),email:v.email.trim().toLowerCase(),phone:v.phone.trim(),billing:v.billing};
+    {id:'facilityIds',label:'Parks at',type:'checks',options:S.facilities.map(f=>[f.id,f.name]),value:c.facilityIds||[],help:'Only plans at these locations can be used. Select none for any location.'},
+    {id:'maxParkers',label:'Parker limit',type:'number',value:c.maxParkers||'',help:'The most monthly parkers this account can have at once. Blank for no limit. Waitlisted people don’t count.'},
+    {id:'planIds',label:'Plans they can use',type:'checks',options:S.permitTypes.map(t=>[t.id,`${t.name} · ${money0(t.price)}/mo`]),value:c.planIds||[],help:'Select none to allow every plan at their locations.'},
+    {id:'billing',label:'How the account pays',type:'select',options:[['invoice','Square invoice each month (card or bank transfer)'],['card','Card on file, charged on the 1st']],value:c.billing||'invoice'},
+    {id:'notes',label:'Notes (only staff see these)',value:c.notes||''},
+  ],extra:isNew?'':`<button type="button" class="btn danger" data-dlg="delete">Delete account</button>`,
+  onExtra:async()=>{if(S.permits.some(p=>p.companyId===c.id&&['active','suspended','waitlist','approved'].includes(p.status)&&(!p.endAt||p.endAt>now()))){toast('Remove this account’s monthly parkers first.',true);return false}if(UI.acct===c.id)UI.acct=null;return write(db=>col(db,'companies').doc(c.id).delete(),'Account deleted')},
+  onSubmit:v=>{const max=v.maxParkers===''?0:Math.max(0,Math.floor(+v.maxParkers||0));
+    const data={name:v.name.trim(),contactName:v.contactName.trim(),email:v.email.trim().toLowerCase(),phone:v.phone.trim(),billing:v.billing,facilityIds:v.facilityIds||[],planIds:v.planIds||[],maxParkers:max,notes:v.notes.trim()};
     if(!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(data.email))return 'Enter a valid email.';
-    if(!isNew)return write(db=>col(db,'companies').doc(c.id).update(data),'Company saved');
+    if(max&&!isNew){const n=S.permits.filter(p=>p.companyId===c.id&&holdsSpace(p)).length;if(n>max)return `This account already has ${n} parkers. Set the limit to ${n} or more, or remove some parkers first.`}
+    if(!isNew)return write(db=>col(db,'companies').doc(c.id).update(data),'Account saved');
     data.portalToken=Array.from(crypto.getRandomValues(new Uint8Array(20)),b=>b.toString(16).padStart(2,'0')).join('');data.createdAt=now();
-    return addDoc('companies',data,R.uid('co')).then(ok=>{if(ok)toast(`${data.name} added.${HOSTED?' Email them their portal link to add employees.':''}`);return ok})}});
+    return addDoc('companies',data,R.uid('co')).then(ok=>{if(ok)toast(`${data.name} added.${HOSTED?' Email them their link so they can add their own parkers.':''}`);return ok})}});
 }
 function typeForm(t){
   t=t||{};
@@ -1997,16 +2110,17 @@ function permitForm(p){
     fields:[
       {id:'holder',label:'Name',value:p.holder,required:true},{id:'email',label:'Email',type:'email',value:p.email},
       {id:'phone',label:'Mobile',type:'tel',value:p.phone},
-      {id:'companyId',label:'Company',type:'select',options:[['','None (individual)'],...S.companies.map(c=>[c.id,c.name])],value:p.companyId||''},
+      {id:'companyId',label:'Account',type:'select',options:[['','None (individual)'],...S.companies.map(c=>[c.id,c.name])],value:p.companyId||''},
       {id:'permitTypeId',label:'Plan',type:'select',options:S.permitTypes.map(t=>[t.id,`${t.name} · ${money0(t.price)}/mo`]),value:p.permitTypeId},
       {id:'plates',label:'License plates',value:(p.plates||[]).join(', '),required:true,help:'Separated by commas.'},
-      ...(isNew?[{id:'paid',label:'This month',type:'select',options:[['bill','Add the rest of this month to the next bill (companies)'],['paid','Paid at the office']],value:'paid'}]:[]),
+      ...(isNew?[{id:'paid',label:'This month',type:'select',options:[['bill','Add the rest of this month to the next bill (companies)'],['paid','Paid at the office']],value:p._bill?'bill':'paid'}]:[]),
     ],
     onSubmit:v=>{const t=typeById(v.permitTypeId);const plates=v.plates.split(',').map(normPlate).filter(Boolean).slice(0,t.maxVehicles||3);if(!plates.length)return 'Add at least one license plate.';
       const co=v.companyId&&byId('companies',v.companyId);
+      if(co&&(isNew||p.companyId!==co.id||p.permitTypeId!==v.permitTypeId||!holdsSpace(p))){const rm=R.accountRoom(co.id,v.permitTypeId,{exclude:p.id});if(rm.error)return rm.error}
       const data={holder:v.holder.trim(),email:v.email.trim().toLowerCase(),phone:v.phone.trim(),permitTypeId:v.permitTypeId,plates,companyId:co?co.id:null,companyName:co?co.name:''};
       if(isNew){const mb=R.monthBounds(now(),facById((t.facilities||[])[0]));if(v.paid==='bill'&&!co)return 'Only company parkers can be added to a bill. Choose “Paid at the office”.';
-        Object.assign(data,{number:String(10000+Math.floor(Math.random()*89999)),status:'active',billing:co?'company':'office',createdAt:now(),startAt:now(),endAt:null,paidThrough:mb.end,source:'office'},v.paid==='bill'?{prorateDue:R.prorate(t)}:{paidAt:now(),amountPaid:R.prorate(t)})}
+        Object.assign(data,{number:R.newMonthlyNumber(),status:'active',billing:co?'company':'office',createdAt:now(),startAt:now(),endAt:null,paidThrough:mb.end,source:'office'},v.paid==='bill'?{prorateDue:R.prorate(t)}:{paidAt:now(),amountPaid:R.prorate(t)})}
       else if(!p.accountId)data.billing=co?'company':'office';
       return isNew?addDoc('permits',data,R.uid('p')).then(ok=>{if(ok)toast(`Monthly #${data.number} added`);return ok}):write(db=>col(db,'permits').doc(p.id).update(data),'Saved')}
   });
@@ -2099,6 +2213,8 @@ function vSettings(){
     <div class="field"><label for="sEnfG">Officer grace after paid time ends (min)</label><input id="sEnfG" type="number" value="${esc((S.config&&S.config.enforcementGraceMin)??10)}"></div>
     <div class="field"><label for="sMLate">Monthly late fee ($)</label><input id="sMLate" type="number" step="0.25" value="${esc((S.config&&S.config.monthlyLateFee)??25)}"></div>
     <div class="field"><label for="sMGrace">Suspend monthly parking after (days past due)</label><input id="sMGrace" type="number" value="${esc((S.config&&S.config.monthlyGraceDays)??5)}"></div>
+    ${HOSTED?`<div class="field"><label for="sMRem">Remind monthly parkers this many days before the 1st (0 = off)</label><input id="sMRem" type="number" min="0" max="25" value="${esc((S.config&&S.config.monthlyReminderDays)??5)}"><div class="help">Renewal notice, card-expiring warning and a follow-up when a payment is past due.</div></div>
+    <div class="field"><label for="sMRemSms">Send reminders by</label><select id="sMRemSms"><option value="1" ${S.config&&S.config.monthlyReminderSms===false?'':'selected'}>Email, and text when they gave a mobile</option><option value="0" ${S.config&&S.config.monthlyReminderSms===false?'selected':''}>Email only</option></select></div>`:''}
     <div class="field"><label for="sInvDue">Company invoices due (days after sending)</label><input id="sInvDue" type="number" value="${esc((S.config&&S.config.invoiceDueDays)??5)}"></div>
     <div class="field"><label for="sStale">Flag open visits older than (hours)</label><input id="sStale" type="number" value="${esc((S.config&&S.config.openVisitFlagHours)??24)}"></div>
     <div class="field"><label for="sBrand">Brand color</label><input id="sBrand" type="color" value="${esc((S.config&&S.config.brandColor)||'#1a56cc')}"></div>
@@ -2110,7 +2226,8 @@ function vSettings(){
     <div class="panel-b" style="padding-top:0"><button class="btn pri">Save schedule</button> <span class="note">Clear a code to remove that row.</span></div></form></section></div>
   <section class="panel"><div class="panel-h"><h2>Records</h2></div><div class="panel-b" style="display:grid;gap:10px">
     <p class="muted" style="margin:0;font-size:.9rem">${S.sessions.length} sessions · ${S.citations.length} notices · ${S.permits.length} monthly parkers · ${S.tenants.length} tenants · ${S.cameras.length} cameras. Remove records marked as samples before going live.</p>
-    <div class="row">${HOSTED?'':'<button class="btn" data-act="refreshSamples">Move sample data to now</button>'}<button class="btn danger" data-act="clearSamples">Remove sample records</button><button class="btn" data-act="pruneSessions">Remove paid sessions older than 90 days</button></div></div></section>
+    <div class="row">${HOSTED?'':'<button class="btn" data-act="refreshSamples">Move sample data to now</button>'}<button class="btn danger" data-act="clearSamples">Remove sample records</button>${HOSTED?'':'<button class="btn" data-act="pruneSessions">Remove paid sessions older than 90 days</button>'}</div>${HOSTED?'<p class="note" style="margin:8px 0 0">Tickets are kept permanently. Find any of them, however old, under History.</p>':''}</div></section>
+  ${HOSTED&&window.scanSettings?window.scanSettings():''}
   ${HOSTED&&window.hostedSettings?window.hostedSettings():''}`;
 }
 
@@ -2125,11 +2242,12 @@ function vEnforcement(){
   const sweep=R.onSiteSessions(f).filter(s=>s.kind!=='permit'&&!s.noPlate).map(s=>({s,r:R.checkPlate(s.plate,f.id)})).sort((a,b)=>({bad:0,warn:1,ok:2}[a.r.level])-({bad:0,warn:1,ok:2}[b.r.level]));
   const mine=S.citations.filter(c=>c.facilityId===f.id&&now()-c.issuedAt<D).sort((a,b)=>b.issuedAt-a.issuedAt);
   return `<div class="enf">
+  ${HOSTED&&window.scanCard?window.scanCard():''}
   <section class="panel"><form class="panel-b" data-form="check" style="display:grid;gap:12px">
     <div class="row"><div class="field"><label for="enfFac">Patrolling</label><select id="enfFac" data-fresh="1">${S.facilities.map(x=>`<option value="${x.id}" ${x.id===UI.enfFac?'selected':''}>${esc(x.name)}</option>`).join('')}</select></div>
     ${hasRes?`<div class="field"><label>Area</label><div class="seg"><button type="button" data-act="enfZone" data-v="general" aria-pressed="${UI.enfZone!=='reserved'}">General</button><button type="button" data-act="enfZone" data-v="reserved" aria-pressed="${UI.enfZone==='reserved'}">Reserved section</button></div></div>`:''}</div>
     <label for="enfPlate" class="muted" style="font-size:.78rem;font-weight:600">Plate</label>
-    <input id="enfPlate" class="plate-in" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="ENTER PLATE">
+    <input id="enfPlate" class="plate-in" autocomplete="off" autocapitalize="characters" autocorrect="off" spellcheck="false" inputmode="text" enterkeyhint="go" placeholder="ENTER PLATE">
     <button class="btn pri lg">Check plate</button></form></section>
   ${r?`<section class="verdict ${r.level}" aria-live="polite"><div class="row" style="justify-content:space-between;align-items:center"><h2>${esc(r.title)}</h2>${plateChip(r.plate)}</div>
     ${r.lines.length?`<ul>${r.lines.map(l=>`<li>${esc(l)}</li>`).join('')}</ul>`:''}
@@ -2254,7 +2372,7 @@ dlgForm.addEventListener('click',async e=>{const b=e.target.closest('[data-dlg]'
 let toastT;function toast(msg,err){const t=$('#toast');t.textContent=msg;t.className='toast'+(err?' err':'');t.hidden=false;clearTimeout(toastT);toastT=setTimeout(()=>t.hidden=true,err?5200:3000)}
 
 /* ============ actions ============ */
-const VIEWS={overview:vOverview,activity:vActivity,tenants:vTenants,facilities:vFacilities,permits:vPermits,citations:vCitations,lpr:vLpr,settings:vSettings,reservations:()=>window.vReservations?window.vReservations():'',payments:()=>window.vPayments?window.vPayments():'',selfparking:()=>window.vSelfParking?window.vSelfParking():'',review:()=>window.vReview?window.vReview():'',valet:()=>window.vValet?window.vValet():'',reports:()=>window.vReports?window.vReports():''};
+const VIEWS={overview:vOverview,activity:vActivity,tenants:vTenants,facilities:vFacilities,permits:vPermits,citations:vCitations,lpr:vLpr,settings:vSettings,reservations:()=>window.vReservations?window.vReservations():'',payments:()=>window.vPayments?window.vPayments():'',history:()=>window.vHistory?window.vHistory():'',daily:()=>window.vDaily?window.vDaily():'',selfparking:()=>window.vSelfParking?window.vSelfParking():'',review:()=>window.vReview?window.vReview():'',valet:()=>window.vValet?window.vValet():'',reports:()=>window.vReports?window.vReports():''};
 const ACT={
   goTab(b){UI.tab=b.dataset.tab;store.set('tab',UI.tab);const f=b.dataset.filter;if(f){if(UI.tab==='permits')UI.permitStatus=f==='pending'?'all':f;if(UI.tab==='citations')UI.citeStatus=f;if(UI.tab==='activity'){UI.auditFilter=f;UI.auditRange='week'}if(UI.tab==='selfparking'){UI.spView='tickets';UI.tkStatus=f;UI.tkRange='month'}}
     if(b.dataset.tenant){UI.tenant=b.dataset.tenant;UI.tenantDay=0}if(b.dataset.fac){UI.actFac=b.dataset.fac;store.set('actFac',UI.actFac)}render();window.scrollTo(0,0)},
@@ -2291,6 +2409,15 @@ const ACT={
     openForm({title:'Cancel #'+p.number,submit:'Cancel monthly parking',danger:true,fields:[{id:'when',label:'When',type:'select',options:[['end',`At the end of the paid period (${fmtDate(end-1)})`],['now','Right away (no refund is issued automatically)']],value:'end'}],
       onSubmit:v=>write(db=>col(db,'permits').doc(p.id).update(v.when==='now'?{status:'cancelled',endAt:now(),cancelledAt:now()}:{endAt:end,cancelledAt:now()}),'Cancelled')})},
   editCompany(b){companyForm(b.dataset.id?byId('companies',b.dataset.id):null)},
+  openAccount(b,e){if(e)e.preventDefault();UI.acct=b.dataset.id;UI.acctQ='';UI.acctFilter='current';UI.acctPage=0;render();window.scrollTo(0,0)},
+  closeAccount(){UI.acct=null;render();window.scrollTo(0,0)},
+  acctFilter(b){UI.acctFilter=b.dataset.v;render()},
+  pagePrev(b){UI[b.dataset.k]=Math.max(0,(UI[b.dataset.k]||0)-1);render();window.scrollTo(0,0)},
+  pageNext(b){UI[b.dataset.k]=(UI[b.dataset.k]||0)+1;render();window.scrollTo(0,0)},
+  acctAdd(b){permitForm({companyId:b.dataset.id,_bill:true})},
+  acctBulk(b){if(window.accountBulkDialog)window.accountBulkDialog(b.dataset.id)},
+  acctExport(b){const c=byId('companies',b.dataset.id);if(!c)return;const tz=(S.config&&S.config.timeZone)||'America/Chicago',rows=S.permits.filter(p=>p.companyId===c.id).sort((a,b)=>(a.holder||'').localeCompare(b.holder||''));
+    saveFile((c.name||'account').replace(/[^\w]+/g,'-').toLowerCase()+'-parkers.csv',csv([['Number','Name','Email','Phone','Plan','Plates','Status','Paid through','Started','Ends'],...rows.map(p=>[p.number,safeCell(p.holder),safeCell(p.email||''),p.phone||'',(typeById(p.permitTypeId)||{}).name||'',(p.plates||[]).join(' '),mStatus(p),p.paidThrough?fmtDate(p.paidThrough-1,tz):'',p.startAt?fmtDate(p.startAt,tz):'',p.endAt?fmtDate(p.endAt-1,tz):''])]))},
   async sendCompanyLink(b){try{await HOSTED.api('POST','/api/admin/companies/'+b.dataset.id+'/send-link');toast('Portal link emailed')}catch(e){toast(e.message,true)}},
   async runBilling(b){b.disabled=true;try{const r=await HOSTED.api('POST','/api/admin/billing/run');toast(r.billed?`Billed ${r.billed} account${r.billed>1?'s':''}`:'Nothing is due right now')}catch(e){toast(e.message,true)}b.disabled=false},
   async invoicePaid(b){const i=byId('invoices',b.dataset.id);confirmBox('Mark invoice paid',`Mark ${esc(i.companyName)}’s ${esc(i.period)} invoice (${money(i.amount)}) as paid outside Square? Its parkers are reactivated.`,'Mark paid',async()=>{try{await HOSTED.api('POST','/api/admin/invoices/'+i.id+'/paid');toast('Invoice marked paid');return true}catch(e){return e.message}})},
@@ -2340,7 +2467,7 @@ const FORMS={
     let photoIds=[];if(HOSTED&&window.citePhotoIds)photoIds=window.citePhotoIds(UI.check.plate,UI.check.facId);
     const ok=await issueCitation({plate:UI.check.plate,facId:UI.check.facId,code:$('#citeViol').value,officer,notes:$('#citeNotes').value.trim(),plateState:($('#citeState')||{}).value,photoIds});
     if(ok){$('#citeNotes').value='';if(window.clearCitePhotos)window.clearCitePhotos();render()}},
-  async settings(){const g=+$('#sGrace').value||48;await write(db=>db.doc('settings/config').set(Object.assign({},S.config||{},{campusName:$('#sCampus').value.trim(),timeZone:$('#sTz').value,unpaidGraceHours:g,lateFee:Math.max(0,+$('#sLate').value||0),autoCiteHours:Math.max(0,+$('#sCiteH').value||0),hotListAmount:Math.max(1,+$('#sHotAmt').value||100),hotListCount:Math.max(1,+$('#sHotN').value||3),alertEmail:$('#sAlert').value.trim(),printerWidth:+$('#sPrint').value||3,taxRate:Math.max(0,Math.min(20,+$('#sTax').value||0)),taxIncluded:$('#sTaxInc').value==='1',enforcementGraceMin:Math.max(0,+$('#sEnfG').value||0),monthlyLateFee:Math.max(0,+$('#sMLate').value||0),monthlyGraceDays:Math.max(1,+$('#sMGrace').value||5),invoiceDueDays:Math.max(1,+$('#sInvDue').value||5),openVisitFlagHours:Math.max(1,+$('#sStale').value||24),brandColor:$('#sBrand').value,brandStripe:$('#sStripe').value})),'Settings saved')},
+  async settings(){const g=+$('#sGrace').value||48;await write(db=>db.doc('settings/config').set(Object.assign({},S.config||{},{campusName:$('#sCampus').value.trim(),timeZone:$('#sTz').value,unpaidGraceHours:g,lateFee:Math.max(0,+$('#sLate').value||0),autoCiteHours:Math.max(0,+$('#sCiteH').value||0),hotListAmount:Math.max(1,+$('#sHotAmt').value||100),hotListCount:Math.max(1,+$('#sHotN').value||3),alertEmail:$('#sAlert').value.trim(),printerWidth:+$('#sPrint').value||3,taxRate:Math.max(0,Math.min(20,+$('#sTax').value||0)),taxIncluded:$('#sTaxInc').value==='1',enforcementGraceMin:Math.max(0,+$('#sEnfG').value||0),monthlyLateFee:Math.max(0,+$('#sMLate').value||0),monthlyGraceDays:Math.max(1,+$('#sMGrace').value||5),invoiceDueDays:Math.max(1,+$('#sInvDue').value||5),...($('#sMRem')?{monthlyReminderDays:Math.max(0,Math.min(25,+$('#sMRem').value||0)),monthlyReminderSms:$('#sMRemSms').value==='1'}:{}),openVisitFlagHours:Math.max(1,+$('#sStale').value||24),brandColor:$('#sBrand').value,brandStripe:$('#sStripe').value})),'Settings saved')},
   async violations(){const v=[];violations().forEach((_,i)=>{const code=normPlate($('#vc'+i).value);if(!code)return;v.push({code,name:$('#vn'+i).value.trim()||code,fine:+$('#vf'+i).value||0})});
     if(new Set(v.map(x=>x.code)).size!==v.length){toast('Each violation needs a unique code.',true);return}
     await write(db=>db.doc('settings/config').set(Object.assign({},S.config||{},{violations:v})),'Violation schedule saved')},
@@ -2360,7 +2487,7 @@ document.addEventListener('click',e=>{
 });
 document.addEventListener('submit',e=>{const f=e.target.closest('#main form[data-form]');if(!f)return;e.preventDefault();const fn=FORMS[f.dataset.form];if(fn)fn(f)});
 let qT;document.addEventListener('input',e=>{const id=e.target.id;
-  if(id==='permitQ'||id==='citeQ'){clearTimeout(qT);qT=setTimeout(()=>{UI[id]=e.target.value;render()},200)}
+  if(id==='permitQ'||id==='citeQ'||id==='acctQ'||id==='coQ'||id==='coEq'){clearTimeout(qT);qT=setTimeout(()=>{UI[id]=e.target.value;if(id==='coQ')UI.coPage=0;render()},200)}
   if(id==='pHours'||id==='pFac')updateQuote();if(id==='aType')updateTypeInfo()});
 document.addEventListener('change',async e=>{const id=e.target.id;
   if(id==='enfFac'){UI.enfFac=e.target.value;store.set('enfFac',UI.enfFac);UI.check=null;UI.lastCite=null;render()}
@@ -2436,7 +2563,7 @@ render();boot();
     const methods = [['cash', 'Cash'], ['card', 'Card (external terminal or reader)'], ['check', 'Check']].concat(can('tickets.adjust') ? [['comp', 'Complimentary (no money, reason required)']] : []);
     openForm({ title: `Collect ${money(due)} · ${s.plate}`, submit: opts.close && !s.endAt ? 'Collect and close ticket' : 'Record payment', fields: [
       { id: 'method', label: 'Paid with', type: 'select', options: methods, value: 'cash' },
-      { id: 'amount', label: 'Amount ($) · leave as is for full payment', type: 'number', step: '0.01', value: due.toFixed(2), required: true, help: `${money(due)} due${b.tax.tax ? ` (includes ${money(b.tax.tax)} tax)` : ''}. A partial payment leaves the rest owed on the ticket.` },
+      { id: 'amount', label: 'Amount ($) · leave as is for full payment', type: 'number', step: '0.01', value: due.toFixed(2), required: true, help: `${money(due)} due${b.tax.tax ? ` (includes ${money(b.tax.tax)} tax)` : ''}. A partial payment leaves the rest owed on the ticket${opts.close && !s.endAt && !can('tickets.adjust') ? ', and only a manager can close a ticket with money still owed, so collect the full amount' : ''}.` },
       { id: 'tendered', label: 'Cash tendered ($)', type: 'number', step: '0.01', value: '', help: 'Type what the driver hands you; change due appears below. Leave blank for exact change.' },
       { id: 'note', label: 'Note (reason, for complimentary)', value: '' },
     ], extra: `<button type="button" class="btn" id="payExact">Exactly ${money(due)}</button> <span id="changeDue" class="note"></span>`,
@@ -2470,9 +2597,9 @@ render();boot();
   window.closeTicketDialog = function (id) {
     const s = byId('sessions', id); if (!s || s.endAt) return;
     const due = R.balanceOf(s);
-    openForm({ title: `Close ticket ${tk(s)} · ${s.plate}`, submit: 'Confirm departure', fields: [
+    openForm({ title: due > 0 ? `Let out unpaid · ${tk(s)} · ${s.plate}` : `Close ticket ${tk(s)} · ${s.plate}`, submit: due > 0 ? 'Let out unpaid' : 'Confirm departure', danger: due > 0, fields: [
       { id: 'at', label: 'Departure time', type: 'datetime-local', value: dtLocal(now()), help: can('tickets.adjust') ? '' : 'Up to 15 minutes ago; earlier times need a manager.' },
-      { id: 'reason', label: 'Note', value: '', help: due > 0 ? `${money(due)} is owed. Closing without payment leaves the balance for collections; use Collect to take payment first.` : 'Nothing is owed.' },
+      { id: 'reason', label: due > 0 ? 'Reason for letting this car out unpaid' : 'Note', value: '', required: due > 0, help: due > 0 ? `${money(due)} is owed. The balance stays on the books and goes to collections, and your name and this reason are kept on the ticket. To take payment instead, close this and use Collect.` : 'Nothing is owed.' },
     ], onSubmit: async v => { const at = v.at ? new Date(v.at).getTime() : now(); const r = await ticketAction(id, 'close', { at, reason: v.reason }, r => r.balance > 0 ? `Closed · ${money(r.balance)} left unpaid` : 'Ticket closed'); return dlgErrorOrOk(r); } });
   };
   window.adjustTicketDialog = function (id) {
@@ -2541,9 +2668,9 @@ render();boot();
         ${due > 0 && terminal ? `<button class="btn lg" data-act="deskTerminal" data-id="${esc(s.id)}" data-perm="tickets">Square Terminal</button>` : ''}
         ${due > 0 && hosted && member && window.chargeCardOnFile ? `<button class="btn lg" data-act="deskCardOnFile" data-id="${esc(s.id)}" data-perm="tickets">Card on file</button>` : ''}
         ${!s.validation && due > 0 ? `<button class="btn lg" data-act="validateSession" data-id="${esc(s.id)}" data-perm="tickets">Validation code</button>` : ''}
-        ${due > 0 ? `<button class="btn lg" data-act="deskClose" data-id="${esc(s.id)}" data-perm="tickets">Let out unpaid</button>` : ''}
+        ${due > 0 ? `<button class="btn lg" data-act="deskClose" data-id="${esc(s.id)}" data-perm="tickets.adjust">Let out unpaid${can('tickets.adjust') ? '' : ' · manager'}</button>` : ''}
         <button class="btn lg" data-act="openTicket" data-id="${esc(s.id)}">Details</button></div>
-        <p class="note" style="margin:0">Cash and external card payments are recorded here and go on the shift report. ${terminal ? 'Square Terminal sends the amount to the booth device for the driver to tap.' : hosted ? 'Add a Square Terminal device ID to this location to charge cards on a terminal.' : ''}</p>` : `<div class="row"><button class="btn" data-act="printReceipt" data-id="${esc(s.id)}">Print receipt</button><button class="btn" data-act="openTicket" data-id="${esc(s.id)}">Details</button><button class="btn" data-act="deskClear">Next car</button></div>`}
+        <p class="note" style="margin:0">${due > 0 && !can('tickets.adjust') ? 'Only a manager or owner can let a car out with money owed. ' : ''}Cash and external card payments are recorded here and go on the shift report. ${terminal ? 'Square Terminal sends the amount to the booth device for the driver to tap.' : hosted ? 'Add a Square Terminal device ID to this location to charge cards on a terminal.' : ''}</p>` : `<div class="row"><button class="btn" data-act="printReceipt" data-id="${esc(s.id)}">Print receipt</button><button class="btn" data-act="openTicket" data-id="${esc(s.id)}">Details</button><button class="btn" data-act="deskClear">Next car</button></div>`}
     </div></section>`;
   }
   function billTable(b, s) {
@@ -2671,7 +2798,7 @@ render();boot();
             ${b.due > 0 && !R.needsReview(s) && !(s.missedExit && !s.missedResolved) ? act('deskPay', open ? `Collect ${money(b.due)} and close` : `Collect ${money(b.due)}`, 'tickets', 'pri') : ''}
             ${b.due > 0 && terminal ? act('deskTerminal', 'Square Terminal', 'tickets') : ''}
             ${b.due > 0 && hosted && member && window.chargeCardOnFile ? act('deskCardOnFile', 'Charge card on file', 'tickets') : ''}
-            ${open ? act('deskClose', b.due > 0 ? 'Close (leave unpaid)' : 'Close ticket', 'tickets') : act('reopenTicket', 'Reopen', 'tickets.adjust')}
+            ${open ? act('deskClose', b.due > 0 ? 'Let out unpaid' : 'Close ticket', b.due > 0 ? 'tickets.adjust' : 'tickets') : act('reopenTicket', 'Reopen', 'tickets.adjust')}
             ${!s.validation ? act('validateSession', 'Apply validation', 'tickets') : act('validateSession', 'Replace validation', 'tickets.adjust') + act('removeValidation', 'Remove validation', 'tickets.adjust')}
             ${!open ? act('adjustFee', 'Adjust fee', 'tickets.adjust') : ''}
             ${s.waived ? act('unwaive', 'Remove waiver', 'tickets.adjust') : (b.due > 0 || open) ? act('waiveSession', 'Waive', 'tickets.adjust') : ''}
@@ -2786,7 +2913,7 @@ render();boot();
   function importLocal(rows, dry) {
     const norm = s => String(s || '').trim().toLowerCase(), created = [], skipped = [], ops = [];
     const planOf = x => S.permitTypes.find(t => t.id === x || norm(t.name) === norm(x)), coOf = x => x && S.companies.find(c => c.id === x || norm(c.name) === norm(x));
-    const taken = new Map(); S.permits.forEach(pm => { if (['active', 'approved', 'pending', 'suspended'].includes(pm.status) && (!pm.endAt || pm.endAt > now())) (pm.plates || []).forEach(pl => taken.set(normPlate(pl), pm.number)); });
+    const usedNums = new Set(S.permits.map(pm => String(pm.number))), taken = new Map(); S.permits.forEach(pm => { if (['active', 'approved', 'pending', 'suspended'].includes(pm.status) && (!pm.endAt || pm.endAt > now())) (pm.plates || []).forEach(pl => taken.set(normPlate(pl), pm.number)); });
     rows.forEach((r, i) => {
       const line = i + 1, holder = String(r.name || '').trim().slice(0, 80), plates = [...new Set(String(r.plates || '').split(/[,;|\s]+/).map(normPlate).filter(Boolean))], plan = planOf(r.plan), co = coOf(r.company);
       if (!holder) return skipped.push({ line, reason: 'No name' });
@@ -2795,7 +2922,7 @@ render();boot();
       if (r.company && !co) return skipped.push({ line, reason: `Unknown company "${r.company}"` });
       const dup = plates.find(pl => taken.has(pl)); if (dup) return skipped.push({ line, reason: `${dup} is already on monthly #${taken.get(dup)}` });
       const f = facById((plan.facilities || [])[0]), mb = R.monthBounds(now(), f); let paidThrough = mb.end; if (r.paidThrough) { const pt = R.endOfDate(r.paidThrough, f) || Date.parse(r.paidThrough); if (pt > 0) paidThrough = pt; }
-      const number = String(r.number || '').trim().slice(0, 12) || String(10000 + Math.floor(Math.random() * 89999)), email = norm(r.email);
+      let number = String(r.number || '').trim().slice(0, 12); if (!number || usedNums.has(number)) number = R.newMonthlyNumber(usedNums); usedNums.add(number); const email = norm(r.email);
       plates.forEach(pl => taken.set(pl, number)); created.push({ line, holder, plates, plan: plan.name, company: co ? co.name : '', paidThrough });
       ops.push({ type: 'set', coll: 'permits', id: R.uid('p'), data: { holder, email: /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email) ? email : '', phone: String(r.phone || '').slice(0, 30), permitTypeId: plan.id, plates: plates.slice(0, plan.maxVehicles || 3), companyId: co ? co.id : null, companyName: co ? co.name : '', number, status: 'active', billing: co ? 'company' : 'office', createdAt: now(), startAt: r.startAt && Date.parse(r.startAt) > 0 ? Date.parse(r.startAt) : now(), endAt: null, paidThrough, source: 'import', importedAt: now(), notes: String(r.notes || '').slice(0, 300) } });
     });
@@ -2831,6 +2958,56 @@ render();boot();
         else { r = importLocal(parsed, false); applyLocal(r.ops); const ok = await write(db => execOps(db, r.ops)); if (!ok) throw new Error('Couldn’t save.'); }
         show(r, false); toast(`${r.created.length} monthly parker${r.created.length === 1 ? '' : 's'} imported`); go.textContent = 'Done'; go.onclick = () => dlg.close(); go.disabled = false; render();
       } catch (e) { err(e.message); go.disabled = false; }
+    };
+  };
+
+  /* A pasted list of people for one account: name, email, plates, phone (a header row is optional). Shared with the account link. */
+  window.parseParkerList = function (text) {
+    const rows = parseCsv(String(text || '')); if (!rows.length) return [];
+    const known = c => HEAD_MAP[String(c).trim().toLowerCase()];
+    if (rows[0].some(c => ['name', 'plates'].includes(known(c)))) return rowsToObjects(rows);
+    /* No header: name, email, plates, phone. A row of just two cells is a name and either an email or the plates. */
+    return rows.map(r => { const c = r.map(x => String(x || '').trim()); if (c.length >= 3) return { name: c[0], email: c[1], plates: c[2], phone: c[3] || '' }; const emailSecond = /@/.test(c[1] || ''); return { name: c[0], email: emailSecond ? c[1] : '', plates: emailSecond ? '' : (c[1] || ''), phone: '' }; });
+  };
+  window.accountBulkDialog = function (companyId) {
+    const co = byId('companies', companyId); if (!co) return;
+    const plans = S.permitTypes.filter(t => !R.accountRoom(co.id, t.id, { adding: 0 }).error), room = R.accountRoom(co.id, null, { adding: 0 });
+    if (!plans.length) { toast('No plan fits this account. Check the plans and locations on the account.', true); return; }
+    let parsed = null;
+    dlgCfg = null;
+    dlgForm.innerHTML = `<div class="dlg-h"><h2>Add many to ${esc(co.name)}</h2><button type="button" class="btn sm" data-dlg="close">Close</button></div>
+      <div class="dlg-b" style="display:grid;gap:12px">
+        <p class="note" style="margin:0">Paste one person per line, or choose a spreadsheet saved as CSV. Columns: <b>name, email, plates, phone</b> (a header row is fine; add a <b>plan</b> column if people are on different plans). Several plates: separate with a semicolon. ${room.max ? `<b>${room.used.toLocaleString()} of ${room.max.toLocaleString()}</b> spaces are used, so up to <b>${room.left.toLocaleString()}</b> more can be added.` : 'This account has no parker limit.'}</p>
+        <div class="form-grid"><div class="field"><label for="abPlan">Plan for everyone (unless a row names one)</label><select id="abPlan">${plans.map(t => `<option value="${esc(t.id)}">${esc(t.name)} · ${money0(t.price)}/mo</option>`).join('')}</select></div>
+        <div class="field"><label for="abMonth">This month</label><select id="abMonth"><option value="no">Already paid for this month</option><option value="bill">New: bill the rest of this month</option></select></div></div>
+        <div class="field"><label for="abFile">Spreadsheet (CSV)</label><input id="abFile" type="file" accept=".csv,.txt,text/csv,text/tab-separated-values"></div>
+        <div class="field"><label for="abText">…or paste the list</label><textarea id="abText" rows="6" placeholder="Ana Reyes, ana@example.com, ABC1234, 817-555-0100&#10;Ben Ortiz, ben@example.com, XYZ987;QRS456"></textarea></div>
+        <div id="abPrev"></div><p id="abErr" class="pill bad" hidden></p></div>
+      <div class="dlg-f"><button type="button" class="btn" data-dlg="close">Cancel</button><button type="button" class="btn" id="abCheck">Preview</button><button type="button" class="btn pri" id="abGo" disabled>Add</button></div>`;
+    dlg.showModal();
+    const err = m => { const e = $('#abErr', dlgForm); e.textContent = m || ''; e.hidden = !m; };
+    const read = async () => { const f = $('#abFile', dlgForm).files[0]; const text = f ? await f.text() : $('#abText', dlgForm).value; const rows = window.parseParkerList(text); if (!rows.length) throw new Error('Paste at least one person.'); if (rows.length > 1000) throw new Error('Up to 1,000 people at a time. Split the list in two.'); return rows; };
+    const run = async (dry) => {
+      const body = { planId: $('#abPlan', dlgForm).value, prorate: $('#abMonth', dlgForm).value === 'bill', rows: parsed, dryRun: dry };
+      if (HOSTED) return HOSTED.api('POST', '/api/admin/companies/' + encodeURIComponent(co.id) + '/parkers', body);
+      const r = R.planAccountParkers({ companyId: co.id, planId: body.planId, rows: body.rows, prorate: body.prorate, staff: true, source: 'account' });
+      if (r.error) throw new Error(r.error);
+      if (!dry && r.ops.length) { applyLocal(r.ops); const ok = await write(db => execOps(db, r.ops)); if (!ok) throw new Error('Couldn’t save.'); }
+      return r;
+    };
+    const show = (r, dry) => {
+      $('#abPrev', dlgForm).innerHTML = `<div class="split"><span><b>${r.created.length.toLocaleString()}</b> ${dry ? 'ready to add' : 'added'}${r.created.some(c => c.status === 'waitlist') ? ` (${r.created.filter(c => c.status === 'waitlist').length} on the waitlist: the plan is full)` : ''}</span><span><b>${r.skipped.length.toLocaleString()}</b> skipped</span></div>
+        ${r.skipped.length ? `<div class="imp-prev"><table><thead><tr><th>Row</th><th>Why it was skipped</th></tr></thead><tbody>${r.skipped.slice(0, 200).map(x => `<tr><td class="num">${x.line}</td><td>${esc(x.reason)}</td></tr>`).join('')}</tbody></table></div>` : ''}
+        ${r.created.length ? `<div class="imp-prev"><table><thead><tr><th>Row</th><th>Parker</th><th>Plates</th><th>Plan</th></tr></thead><tbody>${r.created.slice(0, 200).map(c => `<tr><td class="num">${c.line}</td><td>${esc(c.holder)}${c.status === 'waitlist' ? ' <span class="pill warn">Waitlist</span>' : ''}${c.email ? '' : '<span class="sub">No email: they won’t get reminders</span>'}</td><td>${esc(c.plates.join(', '))}</td><td>${esc(c.plan)}</td></tr>`).join('')}${r.created.length > 200 ? `<tr><td colspan="4" class="muted">…and ${(r.created.length - 200).toLocaleString()} more</td></tr>` : ''}</tbody></table></div>` : ''}`;
+    };
+    $('#abCheck', dlgForm).onclick = async () => {
+      err(''); try { parsed = await read(); const r = await run(true); show(r, true); const go = $('#abGo', dlgForm); go.disabled = !r.created.length; go.textContent = r.created.length ? `Add ${r.created.length.toLocaleString()} parker${r.created.length === 1 ? '' : 's'}` : 'Add'; }
+      catch (e) { err(e.message); }
+    };
+    $('#abGo', dlgForm).onclick = async () => {
+      if (!parsed) return; err(''); const go = $('#abGo', dlgForm); go.disabled = true;
+      try { const r = await run(false); show(r, false); toast(`${r.created.length.toLocaleString()} parker${r.created.length === 1 ? '' : 's'} added to ${co.name}`); go.textContent = 'Done'; go.onclick = () => dlg.close(); go.disabled = false; $('#abCheck', dlgForm).hidden = true; render(); }
+      catch (e) { err(e.message); go.disabled = false; }
     };
   };
 
@@ -3070,6 +3247,7 @@ render();boot();
         ${rep.filters.includes('fac') ? `<select id="rFac" data-fresh="1" style="width:auto"><option value="">All locations</option>${S.facilities.map(f => `<option value="${f.id}" ${f.id === UI.rFac ? 'selected' : ''}>${esc(f.name)}</option>`).join('')}</select>` : ''}
         ${rep.filters.includes('code') ? `<select id="rCode" data-fresh="1" style="width:auto"><option value="">All codes</option>${codes.map(c => `<option value="${esc(c)}" ${c === UI.rCode ? 'selected' : ''}>${esc(c)}</option>`).join('')}</select>` : ''}
         <button class="btn sm pri" data-act="exportReport" data-perm="export">Export CSV</button></div></div>
+        ${HOSTED && window.hostedReportNote ? window.hostedReportNote(rep, from, to) : ''}
         ${out.rows.length ? `<div class="tbl-wrap"><table><thead><tr>${out.cols.map((c, i) => `<th ${page.length && num(page[0][i]) ? 'class="r"' : ''}>${esc(c)}</th>`).join('')}</tr></thead><tbody>${page.map(r => `<tr>${r.map((v, i) => `<td class="${num(v) ? 'r num' : ''}">${esc(v)}</td>`).join('')}</tr>`).join('')}${out.totals ? `<tr style="font-weight:600;background:var(--surface-2)">${out.totals.map((v, i) => `<td class="${num(v) ? 'r num' : ''}">${esc(v)}</td>`).join('')}</tr>` : ''}</tbody></table></div>` : '<div class="empty">Nothing in this range.</div>'}
         ${pages > 1 ? `<div class="pager"><button class="btn sm" data-act="rPage" data-v="-1" ${UI.rPage === 0 ? 'disabled' : ''}>‹</button><span>Rows ${UI.rPage * SHOW + 1}–${Math.min(out.rows.length, (UI.rPage + 1) * SHOW)} of ${out.rows.length}</span><button class="btn sm" data-act="rPage" data-v="1" ${UI.rPage >= pages - 1 ? 'disabled' : ''}>›</button></div>` : ''}
         ${out.note ? `<div class="foot">${esc(out.note)}</div>` : ''}</section></div>`;
@@ -3132,7 +3310,29 @@ render();boot();
   .safe{font-size:.82rem;color:var(--muted);border-left:3px solid var(--ok);padding-left:10px}
   .plans{display:grid;gap:10px;grid-template-columns:repeat(auto-fill,minmax(230px,1fr))}
   .plan{border:1px solid var(--line);border-radius:var(--r);padding:14px;display:grid;gap:6px;background:var(--surface)}
-  .plan b.p{font-size:1.4rem}`;
+  .plan b.p{font-size:1.4rem}
+  .presets{display:flex;gap:2px;background:var(--surface-2);border-radius:999px;padding:3px;flex-wrap:wrap}
+  .presets button{border:0;background:none;padding:6px 12px;border-radius:999px;font-weight:600;font-size:.86rem;color:var(--muted);cursor:pointer;white-space:nowrap}
+  .presets button[aria-pressed="true"]{background:var(--surface);color:var(--fg);box-shadow:var(--shadow)}
+  .daybar{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+  .daybar .range{font-weight:600}
+  .dim{opacity:.55;transition:opacity .15s;pointer-events:none}
+  .ch{display:grid;grid-template-columns:auto 1fr;grid-template-rows:170px auto;column-gap:8px;font-size:.74rem;color:var(--muted);padding:6px 4px 0}
+  .ch-y{position:relative;min-width:26px;text-align:right}
+  .ch-y span{position:absolute;right:0;transform:translateY(50%);line-height:1;font-variant-numeric:tabular-nums}
+  .ch-plot{position:relative;border-bottom:1px solid var(--line)}
+  .ch-plot .gl{position:absolute;left:0;right:0;height:0;border-top:1px solid var(--line);opacity:.55}
+  .ch-bars{position:absolute;inset:0;display:flex;align-items:flex-end}
+  .ch-col{flex:1 1 0;min-width:0;height:100%;display:flex;align-items:flex-end;justify-content:center;padding:0 1px}
+  .ch-col i{display:block;width:100%;max-width:24px;background:var(--accent);border-radius:4px 4px 0 0}
+  .ch-col:hover i{filter:brightness(1.18)}
+  .ch-col:hover{background:linear-gradient(var(--surface-2),var(--surface-2))}
+  .ch-x{display:flex;grid-column:2}
+  .ch-x span{flex:1 1 0;min-width:0;display:flex;justify-content:center;white-space:nowrap;padding-top:6px}
+  #chTip{position:fixed;z-index:60;background:var(--fg);color:var(--bg,#fff);padding:6px 10px;border-radius:6px;font-size:.8rem;line-height:1.35;white-space:pre-line;pointer-events:none;box-shadow:0 4px 14px rgba(0,0,0,.25);max-width:260px}
+  .daytbl tr[data-act] {cursor:pointer}.daytbl tr[data-act]:hover td{background:var(--surface-2)}
+  .kpis.sm .kpi b{font-size:1.55rem}
+  .skip-note{font-size:.84rem;color:var(--muted)}`;
   document.head.appendChild(css);
   /* The print area and printNow() are shared with the self-parking screens (tickets.js). */
   const printArea = document.getElementById('printArea') || (() => { const d = document.createElement('div'); d.id = 'printArea'; document.body.appendChild(d); return d; })();
@@ -3450,19 +3650,24 @@ render();boot();
     const d = lazy('companyData', '/api/company/' + UI.companyToken);
     if (!d) return '<section class="panel"><div class="empty">Loading…</div></section>';
     if (d.error) return `<section class="panel"><div class="empty">${esc(d.error)}</div></section>`;
-    const c = d.company, emp = d.employees || [], active = emp.filter(e => ['active', 'suspended'].includes(e.status));
+    const c = d.company, all = d.employees || [], active = all.filter(e => ['active', 'suspended'].includes(e.status));
+    const eq = (UI.coEq || '').trim().toLowerCase(), eqp = normPlate(eq), emp0 = eq ? all.filter(e => (e.holder || '').toLowerCase().includes(eq) || (e.email || '').toLowerCase().includes(eq) || String(e.number).includes(eq) || (eqp && (e.plates || []).some(x => normPlate(x).includes(eqp)))) : all;
+    if (UI.coEqKey !== eq) { UI.coEqKey = eq; UI.coEPage = 0; }
+    const EP = 50, epg = Math.min(UI.coEPage || 0, Math.max(0, Math.ceil(emp0.length / EP) - 1)), emp = emp0.slice(epg * EP, epg * EP + EP), full = c.max && c.left === 0;
     const ipill = st => `<span class="pill ${({ PAID: 'ok', UNPAID: 'warn', SCHEDULED: 'info' })[st] || ''}">${esc(String(st || '').replace('_', ' ').toLowerCase())}</span>`;
-    return `<div class="pagehead"><div><h1 style="font-size:1.7rem">${esc(c.name)}</h1><p>Monthly parking for your employees · ${active.length} active · billed ${c.billing === 'invoice' ? 'by Square invoice' : 'to the company card'} on the 1st</p></div></div>
+    return `<div class="pagehead"><div><h1 style="font-size:1.7rem">${esc(c.name)}</h1><p>Monthly parking for your employees · ${active.length.toLocaleString()} active${c.max ? ` of ${c.max.toLocaleString()} allowed` : ''}${(c.locations || []).length ? ' · ' + esc(c.locations.join(', ')) : ''} · billed ${c.billing === 'invoice' ? 'by Square invoice' : 'to the company card'} on the 1st</p></div></div>
     ${UI.receipt ? `<div class="receipt" role="status"><b>${esc(UI.receipt.title)}</b><br>${esc(UI.receipt.body)}</div>` : ''}
     ${c.billing === 'card' ? `<section class="panel"><div class="panel-h"><h2>Company card</h2></div><div class="panel-b row" style="justify-content:space-between;align-items:center">${c.card ? `<span><b>${esc(c.card.brand || 'Card')}</b> ending ${esc(c.card.last4)} · exp ${esc(c.card.exp || '')}</span>` : '<span class="pill warn">No card on file. Add one so employees’ parking stays active.</span>'}<button class="btn ${c.card ? '' : 'pri'}" data-act="companyCard">${c.card ? 'Replace card' : 'Add a card'}</button></div></section>` : ''}
-    <section class="panel"><div class="panel-h"><h2>Employees</h2></div>
-      ${emp.length ? `<div class="tbl-wrap"><table><thead><tr><th>Name</th><th>Plan</th><th>Plates</th><th>Status</th><th></th></tr></thead><tbody>${emp.map(e => `<tr><td><b>${esc(e.holder)}</b><span class="sub">${esc(e.email || '')} · #${esc(e.number)}</span></td><td>${esc(e.plan || '')}</td><td><div class="plates">${(e.plates || []).map(p => `<span class="plate">${esc(p)}</span>`).join('')}</div></td><td>${permitPill({ status: e.status, endAt: e.endAt })}</td><td>${!e.endAt ? `<button class="btn sm" data-act="companyCancel" data-id="${esc(e.id)}" data-name="${esc(e.holder)}">Remove</button>` : ''}</td></tr>`).join('')}</tbody></table></div>` : '<div class="empty">No employees yet.</div>'}</section>
-    <section class="panel"><div class="panel-h"><h2>Add an employee</h2></div><form class="panel-b" data-form="companyAdd" style="display:grid;gap:12px">
+    ${d.employeeTotal > all.length ? `<div class="callout warn">Showing the first ${all.length.toLocaleString()} of ${d.employeeTotal.toLocaleString()} employees. Ask the parking office for the full list.</div>` : ''}
+    ${full ? `<div class="callout warn"><b>You’re at your limit of ${c.max.toLocaleString()} parkers.</b> Remove someone to make room, or ask the parking office to raise the limit.</div>` : ''}
+    <section class="panel"><div class="panel-h"><h2>Employees</h2><div class="row">${all.length > 8 ? `<input id="coEq" type="search" placeholder="Find someone" value="${esc(UI.coEq || '')}" data-fresh="1" style="width:180px">` : ''}${full ? '' : '<button class="btn sm" data-act="companyBulk">Add several at once</button>'}</div></div>
+      ${emp.length ? `<div class="tbl-wrap"><table><thead><tr><th>Name</th><th>Plan</th><th>Plates</th><th>Status</th><th></th></tr></thead><tbody>${emp.map(e => `<tr><td><b>${esc(e.holder)}</b><span class="sub">${esc(e.email || '')} · #${esc(e.number)}</span></td><td>${esc(e.plan || '')}</td><td><div class="plates">${(e.plates || []).map(p => `<span class="plate">${esc(p)}</span>`).join('')}</div></td><td>${permitPill({ status: e.status, endAt: e.endAt })}</td><td>${!e.endAt ? `<button class="btn sm" data-act="companyCancel" data-id="${esc(e.id)}" data-name="${esc(e.holder)}">Remove</button>` : ''}</td></tr>`).join('')}</tbody></table></div>${pager('coEPage', epg, EP, emp0.length)}` : `<div class="empty">${eq ? 'Nobody matches.' : 'No employees yet.'}</div>`}</section>
+    ${full ? '' : `<section class="panel"><div class="panel-h"><h2>Add an employee</h2></div><form class="panel-b" data-form="companyAdd" style="display:grid;gap:12px">
       <div class="form-grid"><div class="field"><label for="ceName">Name</label><input id="ceName"></div><div class="field"><label for="ceEmail">Email</label><input id="ceEmail" type="email"></div>
       <div class="field"><label for="cePhone">Mobile (optional)</label><input id="cePhone" type="tel"></div>
       <div class="field"><label for="cePlan">Plan</label><select id="cePlan">${d.plans.map(p => `<option value="${esc(p.id)}">${esc(p.name)} · ${money0(p.price)}/mo${p.left === 0 ? ' · waitlist' : ''}</option>`).join('')}</select></div>
       <div class="field span"><label for="cePlates">License plates</label><input id="cePlates" style="text-transform:uppercase" placeholder="ABC1234, XYZ987"></div></div>
-      <div><button class="btn pri">Add employee</button></div><p class="note" style="margin:0">The rest of this month is prorated onto your next bill. Removing someone ends their parking at the end of the paid month.</p></form></section>
+      <div><button class="btn pri">Add employee</button></div><p class="note" style="margin:0">The rest of this month is prorated onto your next bill. Removing someone ends their parking at the end of the paid month.${c.max ? ` You can add up to ${(c.left || 0).toLocaleString()} more.` : ''}</p></form></section>`}
     ${(d.invoices || []).length ? `<section class="panel"><div class="panel-h"><h2>Invoices</h2></div><div class="tbl-wrap"><table><thead><tr><th>Month</th><th class="r">Amount</th><th>Due</th><th>Status</th><th></th></tr></thead><tbody>${d.invoices.map(i => `<tr><td class="num">${esc(i.period)}</td><td class="r num">${money(i.amount)}</td><td class="num">${esc(i.dueDate || '')}</td><td>${ipill(i.status)}</td><td>${i.publicUrl && i.status !== 'PAID' ? `<a class="btn sm pri" href="${esc(i.publicUrl)}" target="_blank" rel="noopener">Pay</a>` : i.publicUrl ? `<a class="btn sm" href="${esc(i.publicUrl)}" target="_blank" rel="noopener">View</a>` : ''}</td></tr>`).join('')}</tbody></table></div></section>` : ''}
     <p class="note">This page is private to ${esc(c.name)}. Don’t share the link outside your company.</p>`;
   }
@@ -3511,6 +3716,23 @@ render();boot();
       payDialog({ title: 'Company card', store: true, submit: 'Save card', summary: 'Monthly parking for your employees is charged to this card on the 1st. It’s stored securely by Square.', onPay: async payment => {
         try { await api('POST', '/api/company/' + UI.companyToken + '/card', payment); UI.companyData = undefined; toast('Card saved'); render(); return { ok: true }; } catch (e) { return { error: e.message }; }
       } });
+    },
+    companyBulk() {
+      const d = UI.companyData; if (!d || d.error) return; const plans = d.plans || [], c = d.company; let parsed = null;
+      if (!plans.length) { toast('No plan is open to your account yet. Ask the parking office.', true); return; }
+      dlgCfg = null;
+      dlgForm.innerHTML = `<div class="dlg-h"><h2>Add several employees</h2><button type="button" class="btn sm" data-dlg="close">Close</button></div>
+        <div class="dlg-b" style="display:grid;gap:12px"><p class="note" style="margin:0">Paste one person per line: <b>name, email, plates, phone</b>. Several plates: separate with a semicolon. ${c.max ? `You can add up to <b>${(c.left || 0).toLocaleString()}</b> more.` : ''} The rest of this month is added to your next bill.</p>
+          <div class="field"><label for="cbPlan">Plan</label><select id="cbPlan">${plans.map(p => `<option value="${esc(p.id)}">${esc(p.name)} · ${money0(p.price)}/mo${p.left === 0 ? ' · waitlist' : ''}</option>`).join('')}</select></div>
+          <div class="field"><label for="cbText">The list</label><textarea id="cbText" rows="7" placeholder="Ana Reyes, ana@example.com, ABC1234, 817-555-0100&#10;Ben Ortiz, ben@example.com, XYZ987;QRS456"></textarea></div>
+          <div id="cbPrev"></div><p id="cbErr" class="pill bad" hidden></p></div>
+        <div class="dlg-f"><button type="button" class="btn" data-dlg="close">Cancel</button><button type="button" class="btn" id="cbCheck">Preview</button><button type="button" class="btn pri" id="cbGo" disabled>Add</button></div>`;
+      dlg.showModal();
+      const err = m => { const e = $('#cbErr', dlgForm); e.textContent = m || ''; e.hidden = !m; };
+      const show = (r, dry) => { $('#cbPrev', dlgForm).innerHTML = `<div class="split"><span><b>${r.created.length.toLocaleString()}</b> ${dry ? 'ready to add' : 'added'}</span><span><b>${r.skipped.length.toLocaleString()}</b> skipped</span></div>${r.skipped.length ? `<div class="imp-prev"><table><thead><tr><th>Line</th><th>Why it was skipped</th></tr></thead><tbody>${r.skipped.slice(0, 100).map(x => `<tr><td class="num">${x.line}</td><td>${esc(x.reason)}</td></tr>`).join('')}</tbody></table></div>` : ''}`; };
+      const call = dry => api('POST', '/api/company/' + UI.companyToken + '/parkers', { planId: $('#cbPlan', dlgForm).value, rows: parsed, dryRun: dry });
+      $('#cbCheck', dlgForm).onclick = async () => { err(''); try { parsed = window.parseParkerList($('#cbText', dlgForm).value); if (!parsed.length) throw new Error('Paste at least one person.'); if (parsed.length > 300) throw new Error('Up to 300 people at a time. Split the list in two.'); const r = await call(true); show(r, true); const g = $('#cbGo', dlgForm); g.disabled = !r.created.length; g.textContent = r.created.length ? `Add ${r.created.length.toLocaleString()}` : 'Add'; } catch (e) { err(e.message); } };
+      $('#cbGo', dlgForm).onclick = async () => { if (!parsed) return; err(''); const g = $('#cbGo', dlgForm); g.disabled = true; try { const r = await call(false); show(r, false); UI.companyData = undefined; toast(`${r.created.length.toLocaleString()} added`); g.textContent = 'Done'; g.onclick = () => dlg.close(); g.disabled = false; $('#cbCheck', dlgForm).hidden = true; render(); } catch (e) { err(e.message); g.disabled = false; } };
     },
     companyCancel(b) { confirmBox('Remove employee', `Remove ${esc(b.dataset.name)}? Their parking stays active through the end of the paid month and isn’t billed again.`, 'Remove', async () => { try { const r = await api('POST', `/api/company/${UI.companyToken}/employees/${b.dataset.id}/cancel`); UI.companyData = undefined; UI.receipt = r.receipt; render(); return true; } catch (e) { return e.message; } }); },
   });
@@ -3625,18 +3847,45 @@ render();boot();
     line(noticeLegal(), 18, { lines: 6, gap: 4 }); y += 30;
     return `^XA^CI28^PW${W + 16}^LL${y}^LH0,0\n${z}^XZ`;
   }
-  async function btWrite(zpl) {
-    if (!navigator.bluetooth) throw new Error('This browser can’t reach Bluetooth printers. Use Chrome on an Android phone, or use the print dialog button.');
-    if (!bt.device) bt.device = await navigator.bluetooth.requestDevice({ filters: [{ services: [ZSVC] }, { namePrefix: 'XX' }, { namePrefix: 'ZQ' }, { namePrefix: 'Zebra' }], optionalServices: [ZSVC] });
-    if (!bt.device.gatt.connected || !bt.ch) { const server = await bt.device.gatt.connect(); bt.ch = await (await server.getPrimaryService(ZSVC)).getCharacteristic(ZWRITE); }
-    const data = new TextEncoder().encode(zpl);
-    for (let i = 0; i < data.length; i += bt.chunk) {
-      const part = data.slice(i, i + bt.chunk);
-      try { if (bt.ch.writeValueWithoutResponse) await bt.ch.writeValueWithoutResponse(part); else await bt.ch.writeValue(part); }
-      catch (e) { if (bt.chunk > 20) { bt.chunk = 20; i = -bt.chunk; continue; } throw e; }
-      await new Promise(r => setTimeout(r, 12));
+  /* ---------- the Bluetooth printer (shared with the live scanner) ----------
+     Chrome on Android and the free Bluefy browser on iPhone/iPad can talk to Bluetooth Low Energy printers. Safari on iPhone/iPad can't:
+     it has no Bluetooth access at all. Pairing needs a tap; after that the printer reconnects by itself. */
+  const IOS = /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  const btListeners = [];
+  const btChanged = () => btListeners.forEach(fn => { try { fn(); } catch (e) {} });
+  const noBluetooth = () => new Error(IOS ? 'Safari on iPhone and iPad can’t print to Bluetooth printers. Open ParkOps in the free Bluefy app instead.' : 'This browser can’t reach Bluetooth printers. Use Chrome on Android, or Bluefy on iPhone and iPad.');
+  const btLive = () => !!(bt.device && bt.ch && bt.device.gatt && bt.device.gatt.connected);
+  async function btConnect(opts) {
+    if (!navigator.bluetooth) throw noBluetooth();
+    if (!bt.device) { // choosing a printer has to start from a tap
+      const all = opts && opts.all;
+      bt.device = await navigator.bluetooth.requestDevice(all ? { acceptAllDevices: true, optionalServices: [ZSVC] }
+        : { filters: [{ services: [ZSVC] }, { namePrefix: 'XX' }, { namePrefix: 'ZQ' }, { namePrefix: 'Zebra' }], optionalServices: [ZSVC] });
+      bt.device.addEventListener('gattserverdisconnected', () => { bt.ch = null; btChanged(); });
     }
+    if (!btLive()) {
+      try { const server = await bt.device.gatt.connect(); bt.ch = await (await server.getPrimaryService(ZSVC)).getCharacteristic(ZWRITE); }
+      catch (e) { bt.ch = null; if (e.name === 'NotFoundError') { bt.device = null; throw new Error('That device isn’t a Zebra printer ParkOps can print to. Pick the printer again.'); } throw e; }
+    }
+    bt.name = bt.device.name || 'Zebra printer'; btChanged();
   }
+  async function btWrite(zpl, retried) {
+    if (!btLive()) await btConnect();
+    const data = new TextEncoder().encode(zpl);
+    try {
+      for (let i = 0; i < data.length; i += bt.chunk) {
+        const part = data.slice(i, i + bt.chunk);
+        try { if (bt.ch.writeValueWithoutResponse) await bt.ch.writeValueWithoutResponse(part); else await bt.ch.writeValue(part); }
+        catch (e) { if (bt.chunk > 20) { bt.chunk = 20; i = -bt.chunk; continue; } throw e; }
+        await new Promise(r => setTimeout(r, 12));
+      }
+    } catch (e) { bt.ch = null; if (!retried && bt.device) { await new Promise(r => setTimeout(r, 400)); return btWrite(zpl, true); } throw e; } // the printer slept or dropped: reconnect once and send the whole label again
+  }
+  function testZpl() {
+    const inch = +((S.config || {}).printerWidth) || 3, W = Math.round(inch * 203) - 16;
+    return `^XA^CI28^PW${W + 16}^LL260^LH0,0\n^FO8,20^A0N,36,36^FB${W - 16},1,4,C,0^FDParkOps printer test^FS\n^FO8,70^A0N,26,26^FB${W - 16},1,4,C,0^FD${zsafe(campusName())}^FS\n^FO8,110^GB${W - 16},3,3^FS\n^FO8,125^A0N,24,24^FB${W - 16},2,4,C,0^FD${zsafe(new Date().toLocaleString('en-US'))} · ${inch} inch paper^FS\n^XZ`;
+  }
+  window.printerKit = { supported: () => !!navigator.bluetooth, ios: IOS, connected: btLive, name: () => (btLive() ? bt.name : ''), remembered: () => !!bt.device, connect: btConnect, send: btWrite, test: () => btWrite(testZpl()), onChange: fn => { btListeners.push(fn); }, zpl: () => citationZpl };
   const printNow = (html, page) => window.printNow(html, page);
   function printHtml(c) {
     const cfg = S.config || {}, f = facById(c.facilityId), due = new Date(c.issuedAt + (+cfg.citationDueDays || 14) * 864e5), url = siteBase() + '/c/' + c.number;
@@ -3648,12 +3897,25 @@ render();boot();
   }
   /* Private operators in Texas issue parking charges under the terms posted at the entrance, not government citations. */
   const noticeLegal = () => `This is a private parking charge notice issued by ${campusName()} under the terms posted at this facility. It is not a government citation and does not affect your driving record. Pay or dispute it online within ${(S.config || {}).citationDueDays || 14} days.`;
+  /* What to do when this browser has no Bluetooth (Safari on iPhone and iPad). */
+  window.printHelpDialog = () => {
+    const url = location.origin + '/';
+    openForm({ title: IOS ? 'Printing from iPhone or iPad' : 'Printing to a Zebra printer', body: `<div style="display:grid;gap:12px">
+      <p style="margin:0">${IOS ? 'Safari on iPhone and iPad can’t connect to Bluetooth printers. Apple doesn’t let websites in Safari use Bluetooth.' : 'This browser can’t connect to Bluetooth printers.'} The fix takes a minute and is free:</p>
+      <ol style="margin:0;padding-left:20px;display:grid;gap:6px"><li>${IOS ? 'Install <b>Bluefy</b> from the App Store (a free browser made for Bluetooth devices).' : 'Use <b>Chrome</b> on an Android phone or tablet.'}</li>
+      <li>${IOS ? 'Open Bluefy, paste the ParkOps address below, and sign in.' : 'Open ParkOps there and sign in.'}</li><li>Turn the Zebra printer on, then tap <b>Connect printer</b> and pick it from the list. Do this once each shift.</li></ol>
+      <div class="row"><input readonly value="${esc(url)}" style="flex:1;min-width:0" aria-label="ParkOps address"><button type="button" class="btn" data-hp="copy">Copy address</button></div>
+      <p class="note" style="margin:0">Needs a Zebra mobile printer with Bluetooth Low Energy (ZQ220, ZQ320, ZQ510, ZQ520, ZQ610, ZQ620 and newer). The camera works in Bluefy too, so the officer can scan and print in the same app. In the meantime <b>Print dialog</b> sends the notice to any AirPrint printer.</p></div>`, submit: 'Done', fields: [], onSubmit: () => true });
+    const cancel = dlgForm.querySelector('[data-dlg=close]:not(.sm)'); if (cancel) cancel.hidden = true;
+  };
+  dlgForm.addEventListener('click', async e => { const b = e.target.closest('[data-hp=copy]'); if (!b) return; try { await navigator.clipboard.writeText(location.origin + '/'); toast('Address copied'); } catch (x) { const i = b.previousElementSibling; if (i) { i.select(); toast('Select and copy the address'); } } });
   window.printPanel = c => `<section class="panel"><div class="panel-h"><h3>Notice ${esc(c.number)} issued</h3><span class="pill bad">${money(c.fine)}</span></div><div class="panel-b" style="display:grid;gap:10px">
-    <div class="row"><button class="btn pri lg" data-act="printBT" data-id="${c.id}">Print on Zebra (Bluetooth)</button><button class="btn lg" data-act="printSys" data-id="${c.id}">Print dialog</button><button class="btn" data-act="doneCite">Done</button></div>
-    <p class="note" style="margin:0">Bluetooth printing works in Chrome on Android. The first time, pick your printer from the list; it’s remembered until you close the page. The notice has a QR code that opens the pay and dispute page, and says it is a private notice, not a government citation.</p>
+    <div class="row">${navigator.bluetooth ? `<button class="btn pri lg" data-act="printBT" data-id="${c.id}">Print on Zebra (Bluetooth)</button>` : `<button class="btn pri lg" data-act="printHelp">Print on Zebra: how${IOS ? ' on iPhone/iPad' : ''}</button>`}<button class="btn lg" data-act="printSys" data-id="${c.id}">Print dialog</button><button class="btn" data-act="doneCite">Done</button></div>
+    <p class="note" style="margin:0">${navigator.bluetooth ? 'The first time, pick your printer from the list; it’s remembered until you close the page.' : IOS ? 'Safari on iPhone and iPad can’t reach Bluetooth printers. Tap the button for the quick fix (a free app called Bluefy).' : 'This browser can’t reach Bluetooth printers.'} The notice has a QR code that opens the pay and dispute page, and says it is a private notice, not a government citation.</p>
     ${(c.photoIds || []).length ? `<div class="thumbs">${c.photoIds.map(id => `<img src="/photos/${esc(id)}" alt="Evidence photo">`).join('')}</div>` : ''}</div></section>`;
   Object.assign(ACT, {
-    async printBT(b) { const c = byId('citations', b.dataset.id); b.disabled = true; try { await btWrite(citationZpl(c)); toast('Sent to printer'); } catch (e) { if (e.name !== 'NotFoundError') toast(e.message, true); bt.ch = null; } b.disabled = false; },
+    async printBT(b) { const c = byId('citations', b.dataset.id); b.disabled = true; try { await btWrite(citationZpl(c)); toast('Sent to printer'); } catch (e) { if (e.name !== 'NotFoundError' && e.name !== 'AbortError') toast(e.message, true); } b.disabled = false; },
+    printHelp() { window.printHelpDialog(); },
     printSys(b) { printHtml(byId('citations', b.dataset.id)); },
     doneCite() { UI.lastCite = null; UI.check = null; render(); },
   });
@@ -3741,13 +4003,21 @@ render();boot();
   window.hostedAudit = () => { const a = lazy('auditAll', '/api/admin/audit?limit=5000'); return Array.isArray(a) ? a : null; };
   /* The server’s change log for one ticket, shown on the ticket timeline. */
   window.ticketAudit = id => { const a = lazy('audit:' + id, '/api/admin/audit?coll=sessions&id=' + encodeURIComponent(id) + '&limit=200'); return Array.isArray(a) ? a : null; };
+  /* Overview revenue comes from the server's day totals, so it stays right however many payments a day there are. */
   window.hostedRevenue = function (days) {
     if (!can('payments') && !can('reports')) return null;
-    const l = window.hostedLedger(); if (!l) return null;
-    const out = days.map(d => Object.assign({}, d, { parking: 0, citations: 0, permits: 0 }));
-    const put = (t, k, a) => { const d = out.find(x => t >= x.s && t < x.e); if (d) d[k] += +a || 0; };
-    l.forEach(p => put(p.at, p.kind === 'monthly' ? 'permits' : p.kind === 'citation' ? 'citations' : 'parking', p.amount - (p.refunded || 0)));
-    return out;
+    const key = d => dayStr(d.s + 12 * 36e5), e = actGet(key(days[0]), key(days[days.length - 1]), '');
+    if (!e.data) return null;
+    const by = new Map(e.data.days.map(d => [d.date, d]));
+    return days.map(d => { const r = by.get(key(d)); return r ? Object.assign({}, d, { parking: r.parking, citations: r.notices, permits: r.monthly }) : d; });
+  };
+  /* Reports read what the screen holds (recent tickets and the latest payments); say so when the range reaches further back. */
+  window.hostedReportNote = function (rep, from) {
+    const parts = [], l = Array.isArray(UI.payList) ? UI.payList : null;
+    if (HX.screenSince && from < HX.screenSince) parts.push(`finished tickets from ${fmtFull(HX.screenSince, tzDefault()).replace(/,[^,]*$/, '')} on`);
+    if (l && l.length >= 5000 && from < l[l.length - 1].created_at) parts.push(`the latest ${l.length.toLocaleString()} payments (from ${fmtFull(l[l.length - 1].created_at, tzDefault()).replace(/,[^,]*$/, '')})`);
+    if (!parts.length) return '';
+    return `<div class="callout warn" style="margin:12px 16px 0"><b>This report is incomplete for the days you picked.</b> It reads ${parts.join(' and ')}. For any earlier day, use <b>By day</b> for totals, <b>History</b> for tickets, or <b>By day → Every payment (CSV)</b> for the full list of payments.</div>`;
   };
 
   /* ---------- exit desk: Square Terminal and card on file ---------- */
@@ -3778,7 +4048,7 @@ render();boot();
       let r; try { r = await api('GET', '/api/terminal/' + encodeURIComponent(ck.checkoutId)); } catch (e) { terminalBox({ amount, text: 'Waiting for Square…', sub: e.message, busy: true, cancel: true }); termTimer = setTimeout(poll, 3000); return; }
       if (r.status === 'COMPLETED') {
         terminalBox({ amount, text: 'Paid on the Terminal', sub: (r.closed ? 'Ticket closed. ' : '') + (r.overpaid ? `The card was charged ${money(r.overpaid)} more than is owed now; refund it from the ticket. ` : '') + (r.receiptUrl ? 'Square emailed or printed the receipt.' : ''), done: true });
-        UI.deskDone = { id, change: null, amount }; UI['audit:' + id] = undefined; UI.payList = undefined; render(); return;
+        UI.deskDone = { id, change: null, amount }; UI['audit:' + id] = undefined; UI.payList = undefined; actReset(); render(); return;
       }
       if (r.status === 'CANCELED' || r.status === 'CANCEL_REQUESTED') { terminalBox({ amount, text: r.status === 'CANCELED' ? 'Cancelled' : 'Cancelling…', sub: r.cancelReason ? String(r.cancelReason).replace(/_/g, ' ').toLowerCase() : 'No payment was taken.', done: r.status === 'CANCELED', busy: r.status !== 'CANCELED' }); if (r.status !== 'CANCELED') termTimer = setTimeout(poll, 2000); return; }
       terminalBox({ amount, text: r.status === 'IN_PROGRESS' ? 'Driver is paying on the device…' : 'Waiting for the driver to tap…', busy: true, cancel: true });
@@ -3791,7 +4061,7 @@ render();boot();
     const s = byId('sessions', id); if (!s) return;
     const due = R.balanceOf(s), member = s.memberId ? byId('members', s.memberId) : R.memberForPlate(normPlate(s.plate));
     confirmBox('Charge the card on file', `Charge ${money(R.taxOf(due).total)} to ${esc(member ? member.name : 'the driver')}’s card on file${member && member.card ? ' ending ' + esc(member.card) : ''} for ticket ${esc(R.ticketOf(s))}?${!s.endAt ? ' The ticket closes when the charge goes through.' : ''}`, 'Charge card', async () => {
-      try { const r = await api('POST', '/api/tickets/' + encodeURIComponent(id) + '/chargeCard', { close: !s.endAt }); UI.deskDone = { id, change: null, amount: r.amount }; UI.payList = undefined; toast(r.repeat ? 'That charge already went through.' : `Charged ${money(r.total)}${r.closed ? ' · ticket closed' : ''}`); render(); return true; }
+      try { const r = await api('POST', '/api/tickets/' + encodeURIComponent(id) + '/chargeCard', { close: !s.endAt }); UI.deskDone = { id, change: null, amount: r.amount }; UI.payList = undefined; actReset(); toast(r.repeat ? 'That charge already went through.' : `Charged ${money(r.total)}${r.closed ? ' · ticket closed' : ''}`); render(); return true; }
       catch (e) { return e.message; }
     });
   };
@@ -3799,29 +4069,28 @@ render();boot();
   window.refundByPid = true;
   ACT.refundPid = b => {
     openForm({ title: 'Refund card payment', submit: 'Refund', danger: true, fields: [{ id: 'amount', label: 'Amount ($)', type: 'number', step: '0.01', value: (+b.dataset.max).toFixed(2), required: true }, { id: 'reason', label: 'Reason', required: true }],
-      onSubmit: async v => { if (!(+v.amount > 0 && +v.amount <= +b.dataset.max + 0.005)) return `Enter up to ${money(b.dataset.max)}.`; try { await api('POST', '/api/admin/refund', { sqId: b.dataset.pid, amount: +v.amount, reason: v.reason }); toast('Refunded ' + money(v.amount)); UI.payList = undefined; return true; } catch (e) { return e.message; } } });
+      onSubmit: async v => { if (!(+v.amount > 0 && +v.amount <= +b.dataset.max + 0.005)) return `Enter up to ${money(b.dataset.max)}.`; try { await api('POST', '/api/admin/refund', { sqId: b.dataset.pid, amount: +v.amount, reason: v.reason }); toast('Refunded ' + money(v.amount)); UI.payList = undefined; actReset(); return true; } catch (e) { return e.message; } } });
   };
 
   /* ---------- staff: payments tab (ledger, tax, hot list) ---------- */
-  function taxByMonth(l) {
-    const m = new Map(), tz = tzDefault();
-    l.forEach(p => {
-      const k = new Date(p.at).toLocaleDateString('en-CA', { timeZone: tz }).slice(0, 7), r = m.get(k) || { month: k, gross: 0, refunds: 0, tax: 0, count: 0 };
-      const keep = p.amount ? (p.amount - (p.refunded || 0)) / p.amount : 1;
-      r.gross += p.amount; r.refunds += p.refunded || 0; r.tax += (p.tax || 0) * keep; r.count++; m.set(k, r);
-    });
-    return [...m.values()].sort((a, b) => b.month.localeCompare(a.month));
+  /* Sales tax by month: added up on the server from every payment, so it is complete however busy the year was. */
+  function taxRange() { const t = dayStr(Date.now()), [y, m] = t.split('-').map(Number), d = new Date(Date.UTC(y, m - 1 - 11, 1)); return [d.toISOString().slice(0, 10), t]; }
+  function taxMonths() {
+    const [f, t] = taxRange(), e = actGet(f, t, ''); if (!e.data) return e.err ? { error: e.err } : null;
+    const m = new Map();
+    e.data.days.forEach(d => { const k = d.date.slice(0, 7), r = m.get(k) || { month: k, gross: 0, refunds: 0, tax: 0, count: 0 }; r.gross += d.net + d.refunds; r.refunds += d.refunds; r.tax += d.tax; r.count += d.payments; m.set(k, r); });
+    return [...m.values()].filter(r => r.count).sort((a, b) => b.month.localeCompare(a.month));
   }
   window.vPayments = function () {
     const pays = ledgerRows(), l = window.hostedLedger() || [];
     const hot = R.hotList();
     const cfg = HX.payments || {};
-    const tm = l.length ? taxByMonth(l) : [];
+    const tmr = taxMonths(), tm = Array.isArray(tmr) ? tmr : [];
     const methodName = p => ParkRules.METHODS[p.method] || p.method || '';
     return `<div class="pagehead"><div><h1>Payments</h1><p>${cfg.enabled ? `Square ${esc(cfg.env)} is connected.` : 'Test mode: Square isn’t connected, so card payments are simulated.'} Refunds go back to the original card. Card disputes are handled in your Square Dashboard. Cash, checks and Terminal payments taken at the exit desk are here too.</p></div>
       <button class="btn" data-act="reloadPays">Refresh</button><a class="btn" href="/api/admin/collections.csv" data-perm="export">Export for collections</a><button class="btn" data-act="goTab" data-tab="reports" data-perm="reports">Reports</button></div>
     ${tm.length ? `<section class="panel"><div class="panel-h"><h2>Sales tax by month</h2><button class="btn sm" data-act="exportTax" data-perm="export">Export CSV</button></div><div class="tbl-wrap"><table><thead><tr><th>Month</th><th class="r">Payments</th><th class="r">Collected</th><th class="r">Refunded</th><th class="r">Net</th><th class="r">Sales tax (${esc(String((S.config || {}).taxRate || 0))}%)</th></tr></thead><tbody>${tm.slice(0, 12).map(r => `<tr><td class="num">${esc(r.month)}</td><td class="r num">${r.count}</td><td class="r num">${money(r.gross)}</td><td class="r num">${money(r.refunds)}</td><td class="r num">${money(r.gross - r.refunds)}</td><td class="r num"><b>${money(r.tax)}</b></td></tr>`).join('')}</tbody></table></div>
-      <div class="panel-b note" style="padding-top:8px">Every payment recorded in the system (last 5,000). Check your filing figures with your accountant.</div></section>` : ''}
+      <div class="panel-b note" style="padding-top:8px">Added up from every payment the system has recorded, last 12 months. Check your filing figures with your accountant.</div></section>` : ''}
     <section class="panel"><div class="panel-h"><h2>Hot list</h2><span class="muted" style="font-size:.84rem">Plates that owe ${money((S.config || {}).hotListAmount || 100)} or more, or have ${(S.config || {}).hotListCount || 3}+ open notices. Staff get an alert when one enters.</span></div>
       ${hot.length ? `<div class="tbl-wrap"><table><thead><tr><th>Plate</th><th class="r">Owed</th><th class="r">Unpaid exits</th><th class="r">Open notices</th></tr></thead><tbody>${hot.map(h => `<tr><td>${plateChip(h.plate)}</td><td class="r num"><b>${money(h.debt.total)}</b></td><td class="r num">${h.debt.owed.length}</td><td class="r num">${h.debt.cits.length}</td></tr>`).join('')}</tbody></table></div>` : '<div class="empty">No plates on the hot list.</div>'}</section>
     <section class="panel"><div class="panel-h"><h2>Recent payments</h2></div>
@@ -3829,12 +4098,224 @@ render();boot();
         <td><div class="acts">${p.pid && p.amount > p.refunded ? `<button class="btn sm" data-act="refund" data-id="${esc(p.id)}" data-max="${esc(p.amount - p.refunded)}" data-perm="refunds">Refund</button>` : ''}</div></td></tr>`).join('')}</tbody></table></div>` : '<div class="empty">No payments yet.</div>'}</section>`;
   };
   Object.assign(ACT, {
-    reloadPays() { UI.payList = undefined; render(); },
-    exportTax() { const tm = taxByMonth(window.hostedLedger() || []); saveFile('sales-tax-by-month.csv', csv([['Month', 'Payments', 'Collected', 'Refunded', 'Net', 'Sales tax'], ...tm.map(r => [r.month, r.count, r.gross.toFixed(2), r.refunds.toFixed(2), (r.gross - r.refunds).toFixed(2), r.tax.toFixed(2)])])); },
+    reloadPays() { UI.payList = undefined; actReset(); render(); },
+    exportTax() { const tm = taxMonths(); if (!Array.isArray(tm)) { toast('Still adding it up. Try again in a moment.', true); return; } saveFile('sales-tax-by-month.csv', csv([['Month', 'Payments', 'Collected', 'Refunded', 'Net', 'Sales tax'], ...tm.map(r => [r.month, r.count, r.gross.toFixed(2), r.refunds.toFixed(2), (r.gross - r.refunds).toFixed(2), r.tax.toFixed(2)])])); },
     refund(b) {
       openForm({ title: 'Refund payment', submit: 'Refund', fields: [{ id: 'amount', label: 'Amount ($)', type: 'number', step: '0.01', value: (+b.dataset.max).toFixed(2), required: true }, { id: 'reason', label: 'Reason', value: '' }],
-        onSubmit: async v => { if (!(+v.amount > 0 && +v.amount <= +b.dataset.max + 0.005)) return `Enter up to ${money(b.dataset.max)}.`; try { await api('POST', '/api/admin/refund', { id: b.dataset.id, amount: +v.amount, reason: v.reason }); toast('Refunded ' + money(v.amount)); UI.payList = undefined; return true; } catch (e) { return e.message; } } });
+        onSubmit: async v => { if (!(+v.amount > 0 && +v.amount <= +b.dataset.max + 0.005)) return `Enter up to ${money(b.dataset.max)}.`; try { await api('POST', '/api/admin/refund', { id: b.dataset.id, amount: +v.amount, reason: v.reason }); toast('Refunded ' + money(v.amount)); UI.payList = undefined; actReset(); return true; } catch (e) { return e.message; } } });
     },
+  });
+
+  /* ---------- staff: ticket history ----------
+     Every ticket ever recorded is kept in the server's database. The other screens hold the last few months in memory;
+     this one searches the whole database, so a ticket from three years ago is as easy to find as one from today. */
+  const fmtFull = (t, tz) => t ? new Date(t).toLocaleString([], { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit', timeZone: tz }) : '—';
+  const fmtMins = m => m == null ? '—' : m < 60 ? m + ' min' : Math.floor(m / 60) + ' h' + (m % 60 ? ' ' + (m % 60) + ' min' : '');
+  const fmtBytes = n => !n ? '0 KB' : n >= 1e9 ? (n / 1e9).toFixed(1) + ' GB' : n >= 1e6 ? Math.round(n / 1e6) + ' MB' : Math.max(1, Math.round(n / 1e3)) + ' KB';
+  const HIST_PAGE = 50;
+  const histParams = () => { const p = new URLSearchParams(); if (UI.histQ) p.set('q', UI.histQ); if (UI.histFac) p.set('facility', UI.histFac); if (UI.histFrom) p.set('from', UI.histFrom); if (UI.histTo) p.set('to', UI.histTo); if (UI.histStatus) p.set('status', UI.histStatus); return p; };
+  function histLoad() {
+    const p = histParams(); p.set('limit', HIST_PAGE); p.set('offset', UI.histOff || 0);
+    const mine = UI.histSeq = (UI.histSeq || 0) + 1; UI.histBusy = true;
+    api('GET', '/api/admin/history?' + p).then(d => { if (mine === UI.histSeq) { UI.hist = d; UI.histBusy = false; render(); } }).catch(e => { if (mine === UI.histSeq) { UI.hist = { error: e.message }; UI.histBusy = false; render(); } });
+  }
+  const histPreset = () => { const f = UI.histFrom || '', t = UI.histTo || ''; if (!f && !t) return 'all'; for (const [k] of PRESETS) { const d = presetDates(k); if (d && d[0] === f && d[1] === t) return k; } return 'custom'; };
+  function histPresetPicked(v) {
+    const set = (f, t) => { $('#hFrom').value = f; $('#hTo').value = t; };
+    if (v === 'all') set('', ''); else if (v !== 'custom') { const d = presetDates(v); set(d[0], d[1]); } else { const el = $('#hFrom'); if (el) el.focus(); return; }
+    FORMS.histSearch();
+  }
+  const histStatus = r => !r.endAt ? '<span class="pill info">On site</span>' : r.waived ? '<span class="pill">Waived</span>' : r.cited ? '<span class="pill">Cited</span>' : r.due > 0 ? '<span class="pill bad">Unpaid</span>' : '<span class="pill ok">Paid</span>';
+  window.vHistory = function () {
+    if (UI.hist === undefined) { UI.hist = null; histLoad(); }
+    const h = UI.hist, rows = (h && h.rows) || [], total = (h && h.total) || 0, off = UI.histOff || 0, facs = S.facilities;
+    const opt = (v, l, cur) => `<option value="${esc(v)}" ${String(v) === String(cur || '') ? 'selected' : ''}>${esc(l)}</option>`;
+    const filtered = !!(UI.histQ || UI.histFac || UI.histFrom || UI.histTo || UI.histStatus);
+    return `<div class="pagehead"><div><h1>Ticket history</h1><p>Every ticket ever recorded is kept on the server and can be found here, however old. The other screens show only the most recent months, to stay fast.</p></div>
+      <a class="btn" href="/api/admin/history.csv?${esc(histParams().toString())}" data-perm="export">Export ${filtered ? 'these results' : 'everything'} (CSV)</a></div>
+    <section class="panel"><form class="panel-b filters" data-form="histSearch" autocomplete="off">
+      <input id="hQ" type="search" placeholder="Plate or ticket number" value="${esc(UI.histQ || '')}" style="text-transform:uppercase">
+      <select id="hFac" style="flex:0 1 200px">${opt('', 'All locations', UI.histFac)}${facs.map(f => opt(f.id, f.name, UI.histFac)).join('')}</select>
+      <select id="hStatus" style="flex:0 1 150px">${opt('', 'Any status', UI.histStatus)}${opt('open', 'On site now', UI.histStatus)}${opt('closed', 'Left', UI.histStatus)}</select>
+      <select id="hPreset" style="flex:0 1 150px" aria-label="Dates">${opt('all', 'Any date', histPreset())}${PRESETS.map(([k, l]) => opt(k, l, histPreset())).join('')}</select>
+      <label class="field" style="flex:0 1 160px"><span class="help">From</span><input id="hFrom" type="date" value="${esc(UI.histFrom || '')}"></label>
+      <label class="field" style="flex:0 1 160px"><span class="help">To</span><input id="hTo" type="date" value="${esc(UI.histTo || '')}"></label>
+      <button class="btn pri">Search</button>${filtered ? '<button type="button" class="btn" data-act="histReset">Clear</button>' : ''}</form></section>
+    <section class="panel"><div class="panel-h"><h2>${UI.histBusy ? 'Searching…' : h && !h.error ? `${total.toLocaleString()} ticket${total === 1 ? '' : 's'}${filtered ? ' match' : ' saved'}` : 'Tickets'}</h2>
+      ${total > HIST_PAGE ? `<div class="row" style="align-items:center;gap:8px"><span class="muted" style="font-size:.84rem">${(off + 1).toLocaleString()}–${Math.min(total, off + HIST_PAGE).toLocaleString()}</span><button class="btn sm" data-act="histPage" data-v="-1" ${off <= 0 ? 'disabled' : ''}>‹ Newer</button><button class="btn sm" data-act="histPage" data-v="1" ${off + HIST_PAGE >= total ? 'disabled' : ''}>Older ›</button></div>` : ''}</div>
+      ${!h ? '<div class="empty">Loading…</div>' : h.error ? `<div class="empty">${esc(h.error)}</div>` : rows.length ? `<div class="tbl-wrap"><table><thead><tr><th>Ticket</th><th>Plate</th><th>Location</th><th>Arrived</th><th>Left</th><th class="r">Time</th><th class="r">Charged</th><th class="r">Balance</th><th>Status</th><th></th></tr></thead><tbody>${rows.map(r => { const tz = R.tzOf(facById(r.facilityId)); return `<tr><td class="mono">${esc(r.ticket)}</td><td>${plateChip(r.plate)}</td><td>${esc(r.facility)}</td><td class="num">${fmtFull(r.startAt, tz)}</td><td class="num">${fmtFull(r.endAt, tz)}</td><td class="r num">${fmtMins(r.minutes)}</td><td class="r num">${r.total == null ? '—' : money(r.total)}</td><td class="r num">${r.due > 0 ? `<b>${money(r.due)}</b>` : '—'}</td><td>${histStatus(r)}</td><td><div class="acts"><button class="btn sm" data-act="histOpen" data-id="${esc(r.id)}">Open</button></div></td></tr>`; }).join('')}</tbody></table></div>` : `<div class="empty">${filtered ? 'No tickets match. Try fewer filters, or part of the plate.' : 'No tickets recorded yet.'}</div>`}</section>`;
+  };
+  FORMS.histSearch = () => {
+    const v = id => ($('#' + id) || {}).value || '';
+    UI.histQ = v('hQ').trim(); UI.histFac = v('hFac'); UI.histStatus = v('hStatus'); UI.histFrom = v('hFrom'); UI.histTo = v('hTo'); UI.histOff = 0;
+    if (UI.histFrom && UI.histTo && UI.histFrom > UI.histTo) { toast('The “from” date is after the “to” date.', true); return; }
+    histLoad(); render();
+  };
+  /* A ticket from before the screens’ memory window opens here as a read-only record; recent ones open on the normal ticket page. */
+  async function histDetail(id) {
+    dlgCfg = null;
+    dlgForm.innerHTML = `<div class="dlg-h"><h2>Ticket</h2><button type="button" class="btn sm" data-dlg="close">Close</button></div><div class="dlg-b"><div class="empty">Loading…</div></div>`;
+    dlg.showModal();
+    let d; try { d = await api('GET', '/api/admin/history/' + encodeURIComponent(id)); } catch (e) { dlgForm.querySelector('.dlg-b').innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
+    const r = d.row, tz = R.tzOf(facById(r.facilityId)), b = d.bill || {};
+    const fact = (k, v) => `<div><small class="muted">${k}</small><div>${v}</div></div>`;
+    dlgForm.innerHTML = `<div class="dlg-h"><h2>Ticket ${esc(r.ticket)} · ${esc(r.plate)}</h2><button type="button" class="btn sm" data-dlg="close">Close</button></div>
+      <div class="dlg-b" style="display:grid;gap:14px">
+        <div style="display:grid;gap:10px;grid-template-columns:repeat(auto-fit,minmax(150px,1fr))">${fact('Location', esc(r.facility || '—'))}${fact('Arrived', fmtFull(r.startAt, tz))}${fact('Left', r.endAt ? fmtFull(r.endAt, tz) : 'Still on site')}${fact('Time parked', fmtMins(r.minutes))}${fact('Charged', r.total == null ? '—' : money(r.total))}${fact('Paid', money(r.paid || 0))}${fact('Balance', r.due > 0 ? `<b>${money(r.due)}</b>` : '—')}${fact('Status', histStatus(r))}${r.validation ? fact('Validation', esc(r.validation)) : ''}${d.plateOriginal ? fact('Plate as first read', esc(d.plateOriginal)) : ''}${d.valet ? fact('Valet', `Key ${esc(d.valet.tag || '—')} · ${esc(d.valet.space || '')}`) : ''}</div>
+        ${d.notes ? `<div class="note">${esc(d.notes)}</div>` : ''}
+        ${d.photos && (d.photos.entry || d.photos.exit) ? `<div class="row">${d.photos.entry ? `<a class="btn sm" href="/photos/${esc(d.photos.entry)}" target="_blank" rel="noopener">Entry photo</a>` : ''}${d.photos.exit ? `<a class="btn sm" href="/photos/${esc(d.photos.exit)}" target="_blank" rel="noopener">Exit photo</a>` : ''}<span class="note">Photos are removed after a set number of days unless a notice was issued (Settings shows how many).</span></div>` : ''}
+        <div><b>Payments</b>${d.payments.length ? `<div class="tbl-wrap"><table><thead><tr><th>When</th><th>How</th><th class="r">Amount</th><th>Taken by</th></tr></thead><tbody>${d.payments.map(x => `<tr><td class="num">${fmtFull(x.at, tz)}</td><td>${esc(ParkRules.METHODS[x.method] || x.method)}${x.simulated ? '<span class="sub">Simulated</span>' : ''}</td><td class="r num">${money(x.amount)}${x.refunded ? `<span class="sub">${money(x.refunded)} refunded</span>` : ''}</td><td>${esc(x.by)}</td></tr>`).join('')}</tbody></table></div>` : '<div class="note">No payments recorded.</div>'}</div>
+        <div><b>What happened</b>${d.history.length ? `<div class="list">${d.history.map(x => `<div class="li"><div class="grow"><b>${esc(String(x.action || '').replace(/_/g, ' '))}</b>${x.by ? `<span class="muted"> · ${esc(x.by)}</span>` : ''}${x.detail ? `<div class="muted" style="font-size:.84rem">${esc(x.detail)}</div>` : ''}</div><span class="muted num">${fmtFull(x.at, tz)}</span></div>`).join('')}</div>` : '<div class="note">No changes recorded.</div>'}</div>
+      </div>
+      <div class="dlg-f"><button type="button" class="btn" data-dlg="close">Close</button></div>`;
+  }
+  Object.assign(ACT, {
+    histPage(b) { UI.histOff = Math.max(0, (UI.histOff || 0) + HIST_PAGE * (+b.dataset.v)); histLoad(); render(); window.scrollTo(0, 0); },
+    histReset() { Object.assign(UI, { histQ: '', histFac: '', histFrom: '', histTo: '', histStatus: '', histOff: 0 }); histLoad(); render(); },
+    histOpen(b) { if (byId('sessions', b.dataset.id)) return ACT.openTicket(b); histDetail(b.dataset.id); },
+  });
+
+  /* ---------- staff: activity by day ----------
+     Pick any day, or a run of days, and see what happened: cars in and out, when they arrived, what was collected, who left
+     without paying. The numbers come from the server's database, so it reaches back as far as your records go. */
+  const PRESETS = [['today', 'Today'], ['yesterday', 'Yesterday'], ['week', 'Last 7 days'], ['month', 'Last 30 days'], ['lastmonth', 'Last month'], ['mtd', 'This month'], ['year', 'This year'], ['custom', 'Pick dates']];
+  const dayStr = t => new Date(t).toLocaleDateString('en-CA', { timeZone: tzDefault() });
+  const addDay = (s, n) => new Date(Date.parse(s + 'T00:00:00Z') + n * 864e5).toISOString().slice(0, 10);
+  function presetDates(p) {
+    const t = dayStr(Date.now());
+    if (p === 'today') return [t, t];
+    if (p === 'yesterday') { const y = addDay(t, -1); return [y, y]; }
+    if (p === 'week') return [addDay(t, -6), t];
+    if (p === 'month') return [addDay(t, -29), t];
+    if (p === 'mtd') return [t.slice(0, 8) + '01', t];
+    if (p === 'lastmonth') { const last = addDay(t.slice(0, 8) + '01', -1); return [last.slice(0, 8) + '01', last]; }
+    if (p === 'year') return [t.slice(0, 5) + '01-01', t];
+    return null;
+  }
+  const dayLabel = (str, withYear) => new Date(str + 'T12:00:00Z').toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric', year: withYear ? 'numeric' : undefined, timeZone: 'UTC' });
+  const shortDay = str => new Date(str + 'T12:00:00Z').toLocaleDateString([], { month: 'numeric', day: 'numeric', timeZone: 'UTC' });
+
+  /* One request per (range, location); a range that includes today is asked again every couple of minutes. */
+  const actMap = new Map();
+  function actReset() { actMap.clear(); }
+  window.actReset = actReset;
+  function actGet(from, to, fac) {
+    const key = [from, to, fac || '', to >= dayStr(Date.now()) ? Math.floor(Date.now() / 12e4) : ''].join('|');
+    let e = actMap.get(key);
+    if (!e) {
+      e = { data: null, err: '' }; actMap.set(key, e); if (actMap.size > 30) actMap.delete(actMap.keys().next().value);
+      api('GET', '/api/admin/activity?from=' + from + '&to=' + to + (fac ? '&facility=' + encodeURIComponent(fac) : '')).then(d => { e.data = d; schedule(); }).catch(err => { e.err = err.message || 'Couldn’t load'; schedule(); });
+    }
+    return e;
+  }
+
+  /* A bar chart in plain HTML: hairline grid, bars no thicker than 24px with a rounded top, labels in text colours, hover for the number. */
+  function niceTop(v, ticks) { if (!(v > 0)) return ticks; const raw = v / ticks, e = Math.pow(10, Math.floor(Math.log10(raw))), f = raw / e, n = f <= 1 ? 1 : f <= 2 ? 2 : f <= 2.5 ? 2.5 : f <= 5 ? 5 : 10; return n * e * ticks; }
+  function barChart(items, o) {
+    o = o || {}; const max = Math.max(0, ...items.map(i => i.v)), ticks = 4, top = o.int && max <= 4 ? Math.max(1, Math.ceil(max)) : niceTop(max, ticks), tn = o.int && max <= 4 ? top : ticks, fmt = o.fmt || (x => x.toLocaleString());
+    const step = Math.max(1, Math.ceil(items.length / (o.labels || 8))), ys = Array.from({ length: tn + 1 }, (_, i) => top * i / tn);
+    return `<div class="ch" role="img" aria-label="${esc(o.aria || 'Chart')}">
+      <div class="ch-y">${ys.map(y => `<span style="bottom:${y / top * 100}%">${esc(fmt(y))}</span>`).join('')}</div>
+      <div class="ch-plot">${ys.slice(1).map(y => `<div class="gl" style="bottom:${y / top * 100}%"></div>`).join('')}<div class="ch-bars">${items.map(i => `<div class="ch-col" data-tip="${esc(i.tip)}"><i style="height:${i.v / top * 100}%${i.v > 0 ? ';min-height:2px' : ''}"></i></div>`).join('')}</div></div>
+      <div class="ch-x">${items.map((i, k) => `<span>${k % step === 0 ? esc(i.label) : ''}</span>`).join('')}</div></div>`;
+  }
+  (function () {
+    const tip = document.createElement('div'); tip.id = 'chTip'; tip.hidden = true; document.body.appendChild(tip);
+    const place = e => { const w = tip.offsetWidth, h = tip.offsetHeight; tip.style.left = Math.max(8, Math.min(innerWidth - w - 8, e.clientX + 12)) + 'px'; tip.style.top = (e.clientY - h - 12 < 4 ? e.clientY + 18 : e.clientY - h - 12) + 'px'; };
+    document.addEventListener('mouseover', e => { const c = e.target.closest && e.target.closest('[data-tip]'); if (!c) { tip.hidden = true; return; } tip.textContent = c.dataset.tip; tip.hidden = false; place(e); });
+    document.addEventListener('mousemove', e => { if (!tip.hidden) place(e); });
+    document.addEventListener('scroll', () => { tip.hidden = true; }, true);
+  })();
+  const weekStart = str => { const d = new Date(str + 'T12:00:00Z'), k = (d.getUTCDay() + 6) % 7; return addDay(str, -k); };
+  /* Past about four months the daily bars get too thin to read, so they become weekly bars. */
+  function bucketed(days) {
+    if (days.length <= 120) return days.map(d => Object.assign({}, d, { label: shortDay(d.date), name: dayLabel(d.date, true) }));
+    const m = new Map();
+    days.forEach(d => { const k = weekStart(d.date), b = m.get(k) || { date: k, arrivals: 0, departures: 0, net: 0, parking: 0, monthly: 0, notices: 0, refunds: 0, tax: 0, leftUnpaid: 0, days: 0 }; ['arrivals', 'departures', 'net', 'parking', 'monthly', 'notices', 'refunds', 'tax', 'leftUnpaid'].forEach(f => { b[f] += d[f]; }); b.days++; m.set(k, b); });
+    return [...m.values()].map(b => Object.assign(b, { label: shortDay(b.date), name: 'Week of ' + dayLabel(b.date, true) }));
+  }
+  const money0 = n => '$' + Math.round(n).toLocaleString();
+  const moneyK = n => n >= 1e6 ? '$' + +(n / 1e6).toFixed(1) + 'M' : n >= 1e4 ? '$' + Math.round(n / 1e3) + 'k' : money0(n);
+  const stay = m => m == null ? '—' : m < 60 ? m + 'm' : Math.floor(m / 60) + 'h' + (m % 60 ? ' ' + (m % 60) + 'm' : '');
+  const fmtHour = h => (h % 12 || 12) + (h < 12 ? 'a' : 'p');
+  const fmtHourLong = h => (h % 12 || 12) + ':00 ' + (h < 12 ? 'am' : 'pm');
+  function dailyRange() {
+    let [from, to] = presetDates(UI.dyPreset || 'week') || [UI.dyFrom, UI.dyTo];
+    if (!from || !to) { [from, to] = presetDates('week'); }
+    if (from > to) [from, to] = [to, from];
+    return [from, to];
+  }
+  window.vDaily = function () {
+    if (!UI.dyPreset) UI.dyPreset = 'week';
+    const [from, to] = dailyRange(), fac = UI.dyFac || '', e = actGet(from, to, fac);
+    if (e.data) UI.dyLast = e.data;
+    const rep = e.data || UI.dyLast, loading = !e.data && !e.err, stale = loading && rep, single = from === to;
+    const opt = (v, l, cur) => `<option value="${esc(v)}" ${String(v) === String(cur || '') ? 'selected' : ''}>${esc(l)}</option>`;
+    const thisYear = dayStr(Date.now()).slice(0, 4), multiYear = from.slice(0, 4) !== to.slice(0, 4) || from.slice(0, 4) !== thisYear;
+    const heading = single ? dayLabel(from, true) : dayLabel(from, multiYear) + ' – ' + dayLabel(to, multiYear);
+    const qs = `from=${from}&to=${to}${fac ? '&facility=' + encodeURIComponent(fac) : ''}`;
+    let body = '';
+    if (e.err && !rep) body = `<section class="panel"><div class="empty">${esc(e.err)}</div></section>`;
+    else if (!rep) body = '<section class="panel"><div class="empty">Loading…</div></section>';
+    else {
+      const T = rep.totals, days = rep.days, nonEmpty = days.some(d => d.arrivals || d.departures || d.payments);
+      const first = rep.firstTicketAt ? dayStr(rep.firstTicketAt) : '';
+      const kpi = (label, val, sub, alert) => `<div class="kpi ${alert ? 'alert' : ''}"><small>${label}</small><b>${val}</b><span>${sub || '&nbsp;'}</span></div>`;
+      const lead = Math.max(0, days.findIndex(d => d.arrivals || d.departures || d.payments)), live = days.slice(lead), bk = bucketed(live), weekly = live.length > 120;
+      const inTip = d => `${d.name}\n${d.arrivals.toLocaleString()} cars in · ${d.departures.toLocaleString()} out`;
+      const cashTip = d => `${d.name}\n${money(d.net)} collected${d.refunds ? '\n' + money(d.refunds) + ' refunded' : ''}\n${money(d.parking)} parking · ${money(d.monthly)} monthly · ${money(d.notices)} notices`;
+      const hoursChart = barChart(rep.hours.map((n, h) => ({ v: n, label: h % 3 === 0 ? fmtHour(h) : '', tip: `${fmtHourLong(h)}–${fmtHourLong((h + 1) % 24)}\n${n.toLocaleString()} car${n === 1 ? '' : 's'} arrived${single ? '' : ' (all days added up)'}` })), { int: true, labels: 24, aria: 'Cars arriving, by hour of the day' });
+      const methodName = m => ParkRules.METHODS[m] || m;
+      const rows = (UI.dyAll ? days.slice().reverse() : days.slice().reverse().slice(0, 62));
+      body = `<div class="kpis sm">
+        ${kpi('Cars in', T.arrivals.toLocaleString(), single ? '' : `${Math.round(T.arrivals / Math.max(1, live.length)).toLocaleString()} a day`)}
+        ${kpi('Cars out', T.departures.toLocaleString(), T.monthlyVisits ? `${T.monthlyVisits.toLocaleString()} were monthly parkers` : '')}
+        ${kpi('Collected', money0(T.net), `${money0(T.parking)} parking · ${money0(T.monthly)} monthly${T.notices ? ' · ' + money0(T.notices) + ' notices' : ''}`)}
+        ${kpi('Average stay', stay(T.avgMinutes), 'Cars that left in this period')}
+        ${kpi('Left without paying', T.leftUnpaid.toLocaleString(), T.leftUnpaid ? `${money0(T.leftUnpaidAmount)} not collected` : 'Nothing owed', T.leftUnpaid > 0)}
+        ${kpi('Sales tax included', money0(T.tax), T.refunds ? `After ${money0(T.refunds)} of refunds` : 'In what was collected')}</div>
+      ${nonEmpty ? '' : `<section class="panel"><div class="empty">Nothing was recorded ${single ? 'on this day' : 'in these days'}${first && from < first ? `. Your records begin ${dayLabel(first, true)}.` : '.'}</div></section>`}
+      ${nonEmpty ? `<div class="grid g2e">
+        <section class="panel"><div class="panel-h"><h2>${single ? 'Cars arriving, by hour' : 'Cars in' + (weekly ? ', by week' : ', by day')}</h2></div><div class="panel-b">${single ? hoursChart : barChart(bk.map(d => ({ v: d.arrivals, label: d.label, tip: inTip(d) })), { int: true, aria: 'Cars in by ' + (weekly ? 'week' : 'day') })}</div></section>
+        <section class="panel"><div class="panel-h"><h2>${single ? 'When they came' : 'Collected' + (weekly ? ', by week' : ', by day')}</h2></div><div class="panel-b">${single
+          ? `<div style="display:grid;gap:8px;font-size:.92rem"><div>Busiest hour: <b>${(() => { const mx = Math.max(...rep.hours); return mx ? fmtHourLong(rep.hours.indexOf(mx)) + ' (' + mx.toLocaleString() + ' cars)' : '—'; })()}</b></div><div>Collected: <b>${money(T.net)}</b> from ${T.payments.toLocaleString()} payment${T.payments === 1 ? '' : 's'}</div>${T.refunds ? `<div>Refunded: <b>${money(T.refunds)}</b></div>` : ''}</div>`
+          : barChart(bk.map(d => ({ v: Math.max(0, d.net), label: d.label, tip: cashTip(d) })), { fmt: moneyK, aria: 'Money collected by ' + (weekly ? 'week' : 'day') })}</div></section>
+        ${single ? '' : `<section class="panel"><div class="panel-h"><h2>When cars arrive</h2><span class="muted" style="font-size:.84rem">${live.length === 1 ? 'The one day' : 'All ' + live.length + ' days'} added up</span></div><div class="panel-b">${hoursChart}</div></section>`}
+        <section class="panel"><div class="panel-h"><h2>By location</h2></div><div class="tbl-wrap"><table><thead><tr><th>Location</th><th class="r">Cars in</th><th class="r">Cars out</th><th class="r">Collected</th></tr></thead><tbody>${rep.byFacility.filter(f => f.arrivals || f.departures || f.revenue).map(f => `<tr><td>${esc(f.name)}</td><td class="r num">${f.arrivals.toLocaleString()}</td><td class="r num">${f.departures.toLocaleString()}</td><td class="r num">${money(f.revenue)}</td></tr>`).join('') || '<tr><td colspan="4" class="muted">Nothing recorded.</td></tr>'}</tbody></table></div></section>
+        <section class="panel"><div class="panel-h"><h2>How people paid</h2></div><div class="tbl-wrap"><table><thead><tr><th>Method</th><th class="r">Payments</th><th class="r">Amount</th></tr></thead><tbody>${rep.byMethod.length ? rep.byMethod.map(m => `<tr><td>${esc(methodName(m.method))}</td><td class="r num">${m.count.toLocaleString()}</td><td class="r num">${money(m.amount)}</td></tr>`).join('') : '<tr><td colspan="3" class="muted">No payments.</td></tr>'}</tbody></table></div></section></div>` : ''}
+      ${nonEmpty && !single ? `<section class="panel"><div class="panel-h"><h2>Day by day</h2><span class="muted" style="font-size:.84rem">Click a day to see its tickets</span></div><div class="tbl-wrap"><table class="daytbl"><thead><tr><th>Day</th><th class="r">Cars in</th><th class="r">Cars out</th><th class="r">Average stay</th><th class="r">Left without paying</th><th class="r">Collected</th><th class="r">Refunded</th><th class="r">Sales tax</th></tr></thead><tbody>${rows.map(d => `<tr data-act="dayOpen" data-d="${d.date}"><td>${dayLabel(d.date, multiYear)}</td><td class="r num">${d.arrivals.toLocaleString()}</td><td class="r num">${d.departures.toLocaleString()}</td><td class="r num">${d.avgMinutes == null ? '—' : fmtMins(d.avgMinutes)}</td><td class="r num">${d.leftUnpaid ? `${d.leftUnpaid.toLocaleString()} · ${money(d.leftUnpaidAmount)}` : '—'}</td><td class="r num">${money(d.net)}</td><td class="r num">${d.refunds ? money(d.refunds) : '—'}</td><td class="r num">${money(d.tax)}</td></tr>`).join('')}</tbody><tfoot><tr><td><b>Total</b></td><td class="r num"><b>${T.arrivals.toLocaleString()}</b></td><td class="r num"><b>${T.departures.toLocaleString()}</b></td><td class="r num"><b>${T.avgMinutes == null ? '—' : fmtMins(T.avgMinutes)}</b></td><td class="r num"><b>${T.leftUnpaid.toLocaleString()}</b></td><td class="r num"><b>${money(T.net)}</b></td><td class="r num"><b>${money(T.refunds)}</b></td><td class="r num"><b>${money(T.tax)}</b></td></tr></tfoot></table></div>
+        ${days.length > rows.length ? `<div class="panel-b"><button class="btn sm" data-act="dayAll">Show all ${days.length} days</button></div>` : ''}</section>` : ''}
+      ${single && nonEmpty ? `<div class="row"><button class="btn pri" data-act="dayOpen" data-d="${from}">See this day’s tickets</button></div>` : ''}
+      <p class="skip-note">Days run midnight to midnight in ${esc(rep.timeZone)}. “Left without paying” counts cars that left owing money that was not paid, waived or sent as a notice. Collected is net of refunds.</p>`;
+    }
+    return `<div class="pagehead"><div><h1>Activity by day</h1><p>Pick any day, or a run of days, and see what happened. It reaches back as far as your records go.</p></div>
+      <div class="row"><a class="btn" href="/api/admin/activity.csv?${esc(qs)}" data-perm="export">Summary (CSV)</a><a class="btn" href="/api/admin/payments.csv?${esc(qs)}" data-perm="export">Every payment (CSV)</a></div></div>
+    <section class="panel"><div class="panel-b" style="display:grid;gap:12px">
+      <div class="presets" role="group" aria-label="Dates">${PRESETS.map(([k, l]) => `<button type="button" data-act="dyPreset" data-v="${k}" aria-pressed="${(UI.dyPreset || 'week') === k}">${l}</button>`).join('')}</div>
+      <div class="daybar">
+        ${UI.dyPreset === 'custom' ? `<label class="field" style="flex:0 1 160px"><span class="help">From</span><input id="dyFrom" type="date" value="${esc(from)}" max="${esc(dayStr(Date.now()))}" data-dyfield="1"></label><label class="field" style="flex:0 1 160px"><span class="help">To</span><input id="dyTo" type="date" value="${esc(to)}" max="${esc(dayStr(Date.now()))}" data-dyfield="1"></label>` : ''}
+        <button class="btn sm" data-act="dyStep" data-v="-1" aria-label="Earlier">‹ Earlier</button><button class="btn sm" data-act="dyStep" data-v="1" aria-label="Later" ${to >= dayStr(Date.now()) ? 'disabled' : ''}>Later ›</button>
+        <span class="range">${esc(heading)}</span>${loading ? '<span class="muted">Loading…</span>' : ''}
+        <span style="flex:1"></span>
+        <select id="dyFac" style="flex:0 1 220px" aria-label="Location">${opt('', 'All locations', fac)}${S.facilities.map(f => opt(f.id, f.name, fac)).join('')}</select>
+        <button class="btn sm" data-act="dyRefresh">Refresh</button></div></div></section>
+    <div class="${stale ? 'dim' : ''}" style="display:grid;gap:14px">${body}</div>`;
+  };
+  document.addEventListener('change', e => {
+    if (e.target.id === 'dyFac') { UI.dyFac = e.target.value; render(); }
+    else if (e.target.dataset && e.target.dataset.dyfield) { const f = ($('#dyFrom') || {}).value, t = ($('#dyTo') || {}).value; if (f && t) { UI.dyFrom = f; UI.dyTo = t; UI.dyAll = false; render(); } }
+    else if (e.target.id === 'hPreset') { histPresetPicked(e.target.value); }
+  });
+  Object.assign(ACT, {
+    dyPreset(b) { const k = b.dataset.v; if (k === 'custom') { const [f, t] = dailyRange(); UI.dyFrom = f; UI.dyTo = t; } UI.dyPreset = k; UI.dyAll = false; render(); },
+    dyStep(b) { /* move the whole window earlier or later by its own length */
+      const [f, t] = dailyRange(), n = Math.round((Date.parse(t + 'T00:00:00Z') - Date.parse(f + 'T00:00:00Z')) / 864e5) + 1, v = +b.dataset.v, today = dayStr(Date.now());
+      let nf = addDay(f, n * v), nt = addDay(t, n * v); if (nt > today) { nt = today; nf = addDay(nt, -(n - 1)); }
+      UI.dyFrom = nf; UI.dyTo = nt; UI.dyPreset = 'custom'; UI.dyAll = false; render();
+    },
+    dyRefresh() { actReset(); render(); },
+    dayAll() { UI.dyAll = true; render(); },
+    dayOpen(b) { Object.assign(UI, { histQ: '', histFac: UI.dyFac || '', histStatus: '', histFrom: b.dataset.d, histTo: b.dataset.d, histOff: 0 }); UI.hist = undefined; ACT.goTab({ dataset: { tab: 'history' } }); },
   });
 
   /* ---------- staff: people & access, system, activity log ---------- */
@@ -3854,7 +4335,11 @@ render();boot();
       <div><b>Email:</b> ${out && out.configured ? 'Sending' : 'Not set up: messages are kept below instead of sent'}</div>
       <div><b>Text messages:</b> ${sm && sm.configured ? `Sending${HX.sms && HX.sms.number ? ' from ' + esc(HX.sms.number) : ''}` : 'Not set up: texts are kept below instead of sent'}</div>
       <div><b>Text-to-pay webhook:</b> <span class="mono">${esc(siteBase())}/sms/inbound</span></div>
-      <div><b>Backups:</b> automatic every day, last 14 kept on the server disk.</div>
+      <div><b>Backups:</b> automatic every day, the last 7 kept on the server disk. Download one now and then and keep it somewhere else too.</div>
+      ${(() => { const st = lazy('storage', '/api/admin/storage'); if (!st || st.error) return ''; const low = st.disk && (st.disk.free < Math.min(st.disk.total * 0.15, 2e9) || st.disk.free < 200e6);
+        return `<div><b>Saved forever:</b> ${st.tickets.toLocaleString()} ticket${st.tickets === 1 ? '' : 's'}${st.firstTicketAt ? ` since ${fmtFull(st.firstTicketAt, tzDefault()).replace(/,[^,]*$/, '')}` : ''}, plus every payment and change. Search them under History.</div>
+        <div><b>Storage:</b> ${fmtBytes(st.database)} records · ${fmtBytes(st.backups)} backups · ${fmtBytes(st.photos)} photos (${st.photoCount.toLocaleString()}, kept ${st.photoDays} days)${st.disk ? ` · ${fmtBytes(st.disk.free)} free of ${fmtBytes(st.disk.total)}` : ''}</div>
+        ${low ? '<div class="callout warn"><b>The disk is getting full.</b> Your records are safe, but make the disk bigger soon: in Render open the parkops service, choose Disks, and increase the size (it can grow, not shrink).</div>' : ''}`; })()}
       <div class="row"><button class="btn" data-act="backupNow">Download a backup now</button></div></div></section>` : ''}
     <section class="panel" ${can('settings') ? '' : 'style="grid-column:1/-1"'}><div class="panel-h"><h2>Activity log</h2><button class="btn sm" data-act="reloadAudit">Refresh</button></div>
       ${!audit ? '<div class="empty">Loading…</div>' : audit.error ? `<div class="empty">${esc(audit.error)}</div>` : `<div class="tbl-wrap" style="max-height:420px;overflow:auto"><table><thead><tr><th>When</th><th>Who</th><th>What</th><th>Record</th></tr></thead><tbody>${audit.map(a => `<tr><td class="num">${fmtTime(a.at)}</td><td>${esc(a.actor || '')}</td><td>${esc(a.action)}</td><td class="mono">${esc([a.coll, a.doc_id].filter(Boolean).join('/'))}</td></tr>`).join('')}</tbody></table></div>`}</section></div>
@@ -3905,6 +4390,499 @@ render();boot();
   });
   /* Monthly parkers from a spreadsheet (hosted: the server checks plans, companies and duplicate plates). */
   window.hostedMonthlyImport = async (rows, dryRun) => api('POST', '/api/admin/monthly/import', { rows, dryRun: !!dryRun });
+})();
+
+</script>
+<script>
+/* Live plate scanner for iPhone, iPad and Android: hold the phone over a plate and ParkOps reads it, checks it against permits,
+   payments and open notices, and shows OK or a violation. The officer confirms the plate, issues the notice and prints it on a
+   Zebra printer. Loaded after hosted-ui.js (it shares the printer connection).
+
+   How it keeps the bill small: the phone looks at the camera picture itself, for free, about seven times a second. It only sends
+   a frame to the plate reader when the picture is sharp, held steady, and different from the last frame that was sent (a new
+   vehicle). A frame that reads nothing gets two more tries, then waits for the picture to change. The server adds a monthly
+   spending cap on top (SCAN_MONTHLY_CAP). Every number that decides this is in TUNE just below. */
+(function () {
+  const HX = window.PARKOPS_HOSTED;
+  if (!HX) return;
+
+  const TUNE = {
+    tickMs: 140,       // how often the phone looks at the camera picture (free, nothing leaves the phone)
+    minGapMs: 450,     // never send frames closer together than this
+    fastGapMs: 1000,   // "Every second" mode
+    stillMax: 7,       // how much the picture may change between two looks and still count as held steady
+    changeMin: 16,     // how different from the last frame sent counts as a new vehicle
+    panTicks: 3,       // the phone moving for this many looks in a row (about half a second) means "on to the next car", even if the next car looks the same
+    sharpFloor: 2.2,   // below this the box is blank or hopelessly out of focus
+    sharpRel: 0.55,    // must be at least this share of the sharpest recent picture, or it is motion blur
+    contrastMin: 14,   // a plate in the box has contrast; an empty road does not
+    darkMean: 30,      // average brightness (0 to 255) below which we say "too dark"
+    retryEmpty: 2,     // extra tries on a picture that read nothing, before waiting for it to change
+    maxInflight: 2,    // frames being read at the same time
+    minScore: 0.45,    // reads the service is less sure of than this are thrown away
+    lowScore: 0.8,     // reads less sure than this are flagged: check the plate on the vehicle
+    sameCarMs: 10 * 60e3, // the same plate seen again inside this time updates its card instead of adding another
+    keepFrames: 60,    // evidence frames kept in memory for flagged vehicles
+    listMax: 300,
+    sendW: 960,        // the box is sent at most this wide
+    quality: 0.82,
+  };
+  const GW = 192, GH = 96;
+  const SC = { open: false, items: [], byKey: new Map(), seq: 0, cur: null, filter: 'problems', paused: false, mode: 'auto', sound: store.get('scanSound') !== '0', counts: { checked: 0, flagged: 0, notices: 0 },
+    inflight: 0, lastSend: 0, lastSig: null, prevSig: null, sharpRef: 0, retries: 0, lastEmpty: false, fails: 0, backoffUntil: 0, disabled: false, used: null, cap: null, armLeave: false, sent: 0, movingRun: 0, panned: false };
+  const k = () => window.printerKit;
+  const IOSDEV = () => !!(k() && k().ios);
+  const rank = l => (l === 'bad' ? 2 : l === 'warn' ? 1 : 0);
+  const hhmm = t => new Date(t).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  const zoneFor = facId => { const f = facById(facId); return f && +f.reservedSpaces > 0 && UI.enfZone === 'reserved' ? 'reserved' : 'general'; };
+  const verdictOf = (pl, facId) => R.checkPlate(pl, facId, zoneFor(facId));
+  const supportsCamera = () => !!HX.demo || !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia);
+
+  /* ---------- styles ---------- */
+  const css = document.createElement('style');
+  css.textContent = `
+  body.scan-on{overflow:hidden}
+  .scan{position:fixed;inset:0;z-index:40;display:flex;flex-direction:column;background:#0b0f17;color:#eef2f8;--sc-ok:#35b26f;--sc-warn:#e8a92d;--sc-bad:#ee5a4d;
+    padding:env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);touch-action:manipulation;overscroll-behavior:contain;-webkit-text-size-adjust:100%}
+  .scan *{box-sizing:border-box}
+  .scan[hidden]{display:none}
+  .scan-top{display:flex;gap:8px;align-items:center;padding:8px 10px;background:#121927;border-bottom:1px solid #243049}
+  .scan-top select{flex:1;min-width:0;min-height:44px;font-size:16px;border-radius:10px;border:1px solid #33425f;background:#0f1522;color:#fff;padding:0 10px}
+  .sc-btn{min-height:44px;padding:0 14px;border-radius:10px;border:1px solid #33425f;background:#1a2438;color:#eef2f8;font-weight:600;font-size:.92rem;cursor:pointer;white-space:nowrap}
+  .sc-btn.on{border-color:var(--sc-ok);color:#9be3bc}.sc-btn.on:disabled{opacity:1}.sc-btn.pri{background:var(--accent);border-color:var(--accent);color:var(--accent-fg)}.sc-btn:disabled{opacity:.55}
+  .scan-body{flex:1;min-height:0;display:flex;flex-direction:column}
+  .scan-view{position:relative;flex:0 0 auto;height:min(46vh,420px);min-height:230px;background:#000;overflow:hidden}
+  .scan-view video{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;background:#000}
+  .reticle{position:absolute;inset:0;margin:auto;height:68%;aspect-ratio:2.2/1;max-width:92%;border-radius:12px;box-shadow:0 0 0 9999px rgba(0,0,0,.4);pointer-events:none}
+  .reticle i{position:absolute;width:28px;height:28px;border:4px solid #fff;transition:border-color .15s}
+  .reticle i:nth-child(1){left:-3px;top:-3px;border-right:0;border-bottom:0;border-top-left-radius:12px}
+  .reticle i:nth-child(2){right:-3px;top:-3px;border-left:0;border-bottom:0;border-top-right-radius:12px}
+  .reticle i:nth-child(3){left:-3px;bottom:-3px;border-right:0;border-top:0;border-bottom-left-radius:12px}
+  .reticle i:nth-child(4){right:-3px;bottom:-3px;border-left:0;border-top:0;border-bottom-right-radius:12px}
+  .scan-view[data-hit=ok] .reticle i{border-color:var(--sc-ok)}.scan-view[data-hit=warn] .reticle i{border-color:var(--sc-warn)}.scan-view[data-hit=bad] .reticle i{border-color:var(--sc-bad)}
+  .scan-view[data-busy="1"] .reticle i{border-color:#9db7ff}
+  .scan-status{position:absolute;left:50%;top:10px;transform:translateX(-50%);width:max-content;max-width:92%;background:rgba(0,0,0,.62);padding:6px 14px;border-radius:999px;font-weight:600;font-size:.9rem;text-align:center}
+  .scan-status.bad{background:rgba(190,50,40,.85)}
+  .scan-ctl{position:absolute;left:0;right:0;bottom:0;display:flex;gap:6px;justify-content:center;flex-wrap:wrap;padding:24px 8px 8px;background:linear-gradient(transparent,rgba(0,0,0,.7))}
+  .scan-ctl .sc-btn{min-height:40px;padding:0 12px;font-size:.85rem;background:rgba(18,25,39,.82)}
+  .scan-msg{position:absolute;inset:0;display:grid;align-content:center;justify-items:center;gap:12px;padding:20px;text-align:center;background:rgba(5,8,14,.92);font-size:1rem;line-height:1.4}
+  .scan-msg[hidden]{display:none}
+  .scan-note{background:#3a2b0d;color:#ffd98a;padding:8px 12px;font-size:.88rem;text-align:center}
+  .scan-note[hidden]{display:none}
+  .scan-side{flex:1;min-height:0;overflow:auto;-webkit-overflow-scrolling:touch;padding:10px;display:grid;gap:10px;align-content:start}
+  .sc-empty{padding:18px;text-align:center;color:#94a3bd;border:1px dashed #33425f;border-radius:14px}
+  .sc-cur{border-radius:14px;padding:14px;display:grid;gap:8px;border:2px solid}
+  .sc-cur.ok{background:#0e2a1c;border-color:var(--sc-ok)}.sc-cur.warn{background:#33260b;border-color:var(--sc-warn)}.sc-cur.bad{background:#3a1512;border-color:var(--sc-bad)}
+  .sc-cur.fresh{animation:scflash .9s}
+  @keyframes scflash{from{box-shadow:0 0 0 6px rgba(255,255,255,.55)}to{box-shadow:0 0 0 0 rgba(255,255,255,0)}}
+  .sc-cur h2{margin:0;font-size:1.5rem;line-height:1.15}.sc-cur.ok h2{color:#7ee0a8}.sc-cur.warn h2{color:#ffd37a}.sc-cur.bad h2{color:#ff9d93}
+  .sc-cur ul{margin:0;padding-left:18px;color:#d5deee;font-size:.95rem}
+  .sc-head{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+  .sc-word{font-size:.74rem;font-weight:800;letter-spacing:.08em;text-transform:uppercase;padding:3px 9px;border-radius:999px;background:#fff;color:#111}
+  .sc-st{font-weight:700;color:#c8d3ea}
+  .sc-flag{display:inline-block;margin:0 6px 6px 0;padding:3px 10px;border-radius:999px;font-size:.8rem;font-weight:700;background:#4a3511;color:#ffd98a}
+  .sc-flag.bad{background:#4c1b17;color:#ffb3aa}
+  .sc-alts{font-size:.88rem;color:#c8d3ea}.sc-alts button{margin-left:6px;min-height:36px;padding:0 12px;border-radius:8px;border:1px solid #4a5b7c;background:#1a2438;color:#fff;font-weight:700;letter-spacing:.08em}
+  .sc-acts{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+  .sc-b{min-height:48px;padding:0 18px;border-radius:10px;font-weight:700;font-size:1rem;border:1px solid #3a4a69;background:#1a2438;color:#eef2f8;cursor:pointer}
+  .sc-b.go{background:#fff;color:#111;border-color:#fff}.sc-cur.bad .sc-b.go,.sc-row.bad .sc-b.go{background:var(--sc-bad);border-color:var(--sc-bad);color:#fff}
+  .sc-cur.warn .sc-b.go,.sc-row.warn .sc-b.go{background:var(--sc-warn);border-color:var(--sc-warn);color:#1a1200}
+  .sc-b.quiet{background:transparent}.sc-b:disabled{opacity:.55}
+  .sc-done{font-weight:700;color:#9be3bc}
+  .scan-manual{display:flex;gap:8px}
+  .scan-manual input{flex:1;min-width:0;min-height:48px;font-size:1.1rem;text-transform:uppercase;letter-spacing:.1em;border-radius:10px;border:1px solid #33425f;background:#0f1522;color:#fff;padding:0 12px}
+  .scan-sum{display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap;color:#94a3bd;font-size:.85rem}
+  .scan-sum .hot{color:#ffd98a;font-weight:700}
+  .sc-zone{display:flex;gap:6px}.sc-zone button{flex:1}
+  .sc-filter{display:flex;gap:6px}.sc-filter button{flex:1;min-height:42px;border-radius:10px;border:1px solid #33425f;background:#121927;color:#c8d3ea;font-weight:700}.sc-filter button[aria-pressed=true]{background:#24324f;color:#fff;border-color:#5b78b5}
+  .scan-list{list-style:none;margin:0;padding:0;display:grid;gap:8px}
+  .sc-row{display:grid;gap:8px;background:#121927;border:1px solid #243049;border-left:6px solid #52627f;border-radius:10px;padding:10px 12px}
+  .sc-row.ok{border-left-color:var(--sc-ok)}.sc-row.warn{border-left-color:var(--sc-warn)}.sc-row.bad{border-left-color:var(--sc-bad)}
+  .sc-row-h{display:flex;align-items:center;gap:10px}.sc-row-h .grow{flex:1;min-width:0}.sc-row-h b{display:block}.sc-row-h .sub{display:block;color:#94a3bd;font-size:.82rem}
+  .sc-row .thumb{width:54px;height:54px;object-fit:cover;border-radius:6px;border:1px solid #33425f}
+  .scan .plate{font-size:1.15rem;padding:2px 10px}
+  .sc-cur .plate{font-size:1.7rem;padding:3px 14px}
+  @media (min-width:760px) and (min-aspect-ratio:1/1){.scan-body{flex-direction:row}.scan-view{flex:1.25 1 0;height:auto;min-height:0}.scan-side{flex:1 1 0;max-width:540px}}
+  .scancard h3{margin:0}
+  `;
+  document.head.appendChild(css);
+
+  /* ---------- sound ---------- */
+  function tone(freq, ms, at, vol) {
+    const a = SC.audio; if (!a || !SC.sound) return;
+    try { const o = a.createOscillator(), g = a.createGain(), t = a.currentTime + (at || 0); o.type = 'square'; o.frequency.value = freq; o.connect(g); g.connect(a.destination);
+      g.gain.setValueAtTime(vol || .12, t); g.gain.exponentialRampToValueAtTime(.0001, t + ms / 1000); o.start(t); o.stop(t + ms / 1000 + .03); } catch (e) {}
+  }
+  function alertFor(level) {
+    if (level === 'bad') { tone(880, 160, 0, .18); tone(620, 280, .2, .18); try { navigator.vibrate && navigator.vibrate([180, 80, 180]); } catch (e) {} }
+    else if (level === 'warn') { tone(540, 220, 0, .15); try { navigator.vibrate && navigator.vibrate(120); } catch (e) {} }
+    else tone(1250, 40, 0, .05);
+  }
+
+  /* ---------- what the phone sees ---------- */
+  /* Sharpness, contrast and a tiny fingerprint of the box, from a small copy of it. Pure and fast (about 20,000 pixels). */
+  function analyse(d, w, h) {
+    const n = w * h, Y = new Float32Array(n); let sum = 0;
+    for (let i = 0, j = 0; i < n; i++, j += 4) { const y = .299 * d[j] + .587 * d[j + 1] + .114 * d[j + 2]; Y[i] = y; sum += y; }
+    const mean = sum / n; let vs = 0, grad = 0;
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) { const i = y * w + x, c = Y[i]; vs += (c - mean) * (c - mean); if (x < w - 1) grad += Math.abs(Y[i + 1] - c); if (y < h - 1) grad += Math.abs(Y[i + w] - c); }
+    const SW = 12, SH = 6, sig = new Float32Array(SW * SH);
+    for (let by = 0; by < SH; by++) for (let bx = 0; bx < SW; bx++) { let s = 0, c = 0; const y0 = Math.floor(by * h / SH), y1 = Math.floor((by + 1) * h / SH), x0 = Math.floor(bx * w / SW), x1 = Math.floor((bx + 1) * w / SW);
+      for (let y = y0; y < y1; y++) for (let x = x0; x < x1; x++) { s += Y[y * w + x]; c++; } sig[by * SW + bx] = s / c - mean; }
+    return { sharp: grad / (n * 2), contrast: Math.sqrt(vs / n), mean, sig };
+  }
+  const sigDiff = (a, b) => { let s = 0; for (let i = 0; i < a.length; i++) s += Math.abs(a[i] - b[i]); return s / a.length; };
+
+  /* The yellow box sits on top of a video that is scaled to fill its area (cropped at the edges). This finds the same box in the video's own pixels. */
+  function cropRect() {
+    const v = SC.video, rb = SC.reticle.getBoundingClientRect(), vb = v.getBoundingClientRect(), vw = v.videoWidth, vh = v.videoHeight;
+    if (!vw || !vh || !vb.width || !vb.height) return null;
+    const s = Math.max(vb.width / vw, vb.height / vh), ox = (vb.width - vw * s) / 2, oy = (vb.height - vh * s) / 2;
+    let sx = (rb.left - vb.left - ox) / s, sy = (rb.top - vb.top - oy) / s, sw = rb.width / s, sh = rb.height / s;
+    sx = Math.max(0, Math.min(vw - 2, sx)); sy = Math.max(0, Math.min(vh - 2, sy)); sw = Math.max(2, Math.min(vw - sx, sw)); sh = Math.max(2, Math.min(vh - sy, sh));
+    return { sx, sy, sw, sh };
+  }
+  const grabBlob = r => new Promise(res => {
+    const w = Math.min(TUNE.sendW, Math.round(r.sw)), h = Math.max(2, Math.round(w * r.sh / r.sw)), c = SC.sendCanvas; c.width = w; c.height = h;
+    c.getContext('2d').drawImage(SC.video, r.sx, r.sy, r.sw, r.sh, 0, 0, w, h);
+    try { c.toBlob(b => res(b), 'image/jpeg', TUNE.quality); } catch (e) { res(null); }
+  });
+
+  const setStatus = (txt, bad) => { const el = $('#scStatus'); if (!el) return; if (el.textContent !== txt) el.textContent = txt; el.className = 'scan-status' + (bad ? ' bad' : ''); };
+  const setBusy = () => { const v = $('#scView'); if (v) v.dataset.busy = SC.inflight > 0 ? '1' : '0'; };
+  const note = txt => { const el = $('#scNote'); if (!el) return; el.hidden = !txt; el.textContent = txt || ''; };
+
+  function tick() {
+    if (!SC.open || document.hidden || !SC.video) return;
+    const v = SC.video; if (v.readyState < 2 || !v.videoWidth) return;
+    if (SC.disabled) { setStatus('Camera scanning is off. Type plates below.', true); return; }
+    if (SC.paused) { setStatus('Paused'); return; }
+    const r = cropRect(); if (!r) return;
+    const g = SC.gctx; g.drawImage(v, r.sx, r.sy, r.sw, r.sh, 0, 0, GW, GH);
+    let a; try { a = analyse(g.getImageData(0, 0, GW, GH).data, GW, GH); } catch (e) { return; }
+    let gate = 'ready';
+    if (a.contrast < TUNE.contrastMin || a.sharp < TUNE.sharpFloor) gate = a.mean < TUNE.darkMean ? 'dark' : 'idle';
+    else if (SC.prevSig && sigDiff(a.sig, SC.prevSig) > TUNE.stillMax) gate = 'moving';
+    else if (a.sharp < TUNE.sharpRel * SC.sharpRef) gate = 'blurry';
+    if (gate === 'moving') SC.movingRun++; else { if (SC.movingRun >= TUNE.panTicks) SC.panned = true; SC.movingRun = 0; }
+    SC.sharpRef = Math.max(a.sharp, SC.sharpRef * .97); SC.prevSig = a.sig; SC.gate = gate; SC.lastLook = { sharp: a.sharp, contrast: a.contrast, mean: a.mean };
+    const t = Date.now();
+    if (t < SC.backoffUntil) { setStatus('Waiting to reconnect…'); return; }
+    if (SC.inflight >= TUNE.maxInflight) { setStatus('Reading…'); return; }
+    if (gate !== 'ready') { setStatus(SC.inflight ? 'Reading…' : gate === 'moving' ? 'Hold steady' : gate === 'blurry' ? 'Too blurry. Hold steady' : gate === 'dark' ? 'Too dark. Try the light' : 'Hold the box over a plate'); return; }
+    const gap = SC.mode === 'fast' ? TUNE.fastGapMs : TUNE.minGapMs;
+    if (t - SC.lastSend < gap) return;
+    const changed = !SC.lastSig || SC.panned || sigDiff(a.sig, SC.lastSig) > TUNE.changeMin;
+    let why = '';
+    if (changed) { why = 'new'; SC.retries = 0; SC.panned = false; }
+    else if (SC.lastEmpty && SC.retries < TUNE.retryEmpty && t - SC.lastSend >= 900) { why = 'retry'; SC.retries++; }
+    else if (SC.mode === 'fast') why = 'fast';
+    if (!why) { if (!SC.inflight) setStatus(SC.lastEmpty ? 'No plate found. Move closer or tilt' : 'Move to the next vehicle'); return; }
+    SC.lastSig = a.sig; send(why, r);
+  }
+
+  /* ---------- reading a frame ---------- */
+  async function post(blob) {
+    if (HX.demo) return HX.demo.read(blob);   // demo build: the pretend reader answers from the pretend camera
+    const ctl = new AbortController(), to = setTimeout(() => ctl.abort(), 12000);
+    try {
+      const res = await fetch('/api/enforcement/scan', { method: 'POST', headers: { 'X-ParkOps': '1', 'Content-Type': 'image/jpeg' }, body: blob, credentials: 'same-origin', signal: ctl.signal });
+      let j = {}; try { j = await res.json(); } catch (e) {}
+      if (res.ok) return j;
+      const e = new Error((j.error && j.error.message) || ('Scan failed (' + res.status + ')')); e.status = res.status; e.code = j.error && j.error.code; e.retryAfterMs = j.retryAfterMs || 0; e.used = j.used; e.cap = j.cap; throw e;
+    } catch (e) { if (!e.status) { const n = new Error(navigator.onLine === false ? 'No connection' : 'Couldn’t reach ParkOps'); n.status = 0; throw n; } throw e; }
+    finally { clearTimeout(to); }
+  }
+  async function send(why, r) {
+    SC.inflight++; SC.lastSend = Date.now(); setBusy(); if (why !== 'retry') setStatus('Reading…');
+    try {
+      const blob = await grabBlob(r || cropRect());
+      if (!blob || !SC.open) return;
+      SC.sent++;
+      const j = await post(blob);
+      SC.fails = 0; SC.backoffUntil = 0; note('');
+      if (j.used != null) { SC.used = j.used; SC.cap = j.cap; }
+      const got = onPlates(j.plates || [], blob);
+      SC.lastEmpty = !got; if (got) SC.retries = 0;
+      if (!got) setStatus(why === 'read' ? 'No plate found. Move closer or tilt' : 'Looking…');
+    } catch (e) { onError(e); }
+    finally { SC.inflight--; setBusy(); renderSum(); }
+  }
+  function onError(e) {
+    if (e.code === 'scan_cap') { SC.disabled = true; if (e.used != null) { SC.used = e.used; SC.cap = e.cap; } note(e.message); return; }
+    if (e.code === 'scan_off') { SC.disabled = true; note(e.message); return; }
+    if (e.status === 401 || e.status === 403) { SC.disabled = true; note('You were signed out. Close the scanner and sign in again.'); return; }
+    SC.lastSig = null; // that frame was never read, so the same picture is allowed another try
+    if (e.status === 429) { SC.backoffUntil = Date.now() + (e.retryAfterMs || 1500); return; }
+    SC.fails++; SC.backoffUntil = Date.now() + Math.min(8000, 1000 * Math.pow(2, Math.min(SC.fails, 3)));
+    if (SC.fails >= 3) note(e.message + '. Still trying. You can type plates meanwhile.');
+  }
+
+  /* ---------- results ---------- */
+  function onPlates(list, frame) {
+    const good = list.filter(p => p.score >= TUNE.minScore).slice(0, 3); if (!good.length) return 0;
+    let top = null;
+    good.forEach(p => { const r = addRead({ plate: p.plate, score: p.score, state: p.state || '', alts: (p.candidates || []).map(c => c.plate).filter(x => x && x !== p.plate && x.length >= 2).slice(0, 2), frame });
+      if (r && r.beep && (!top || rank(r.level) > rank(top))) top = r.level; });
+    if (top) alertFor(top);
+    renderAll(); return good.length;
+  }
+  function addRead(r) {
+    const pl = normPlate(r.plate); if (!pl) return null;
+    const facId = SC.facId, key = facId + '|' + pl, v = verdictOf(pl, facId), t = Date.now();
+    let it = SC.byKey.get(key), beep = false;
+    if (!it || t - it.at > TUNE.sameCarMs) {
+      it = { id: ++SC.seq, key, plate: pl, facId, at: t, n: 1, score: r.score, state: r.state, manual: !!r.manual, alts: r.alts || [], level: v.level }; beep = true;
+      SC.items.unshift(it); SC.byKey.set(key, it); SC.counts.checked++; if (v.level !== 'ok') SC.counts.flagged++;
+    } else {
+      it.n++; const worse = rank(v.level) > rank(it.level) || (v.level !== it.level && it.dismissed); it.at = t;
+      if (r.score > it.score) { it.score = r.score; it.state = r.state || it.state; it.alts = r.alts || it.alts; }
+      if (worse && !it.cited) { beep = true; it.dismissed = false; if (it.level === 'ok') SC.counts.flagged++; }
+      it.level = it.cited ? it.level : v.level;
+      if (!it.dismissed && !it.cited && v.level !== 'ok') { SC.items.splice(SC.items.indexOf(it), 1); SC.items.unshift(it); }
+    }
+    Object.assign(it, { title: v.title, lines: v.lines || [], suggest: v.suggest, towEligible: !!v.towEligible, hot: !!v.hot });
+    if (v.level !== 'ok' && !it.cited && !it.frame && r.frame) { it.frame = r.frame; it.thumb = URL.createObjectURL(r.frame); trimFrames(); }
+    if (SC.items.length > TUNE.listMax) { SC.items.slice(TUNE.listMax).forEach(dropFrame); SC.items.length = TUNE.listMax; for (const [kk, x] of SC.byKey) if (!SC.items.includes(x)) SC.byKey.delete(kk); }
+    SC.cur = it; SC.curFresh = true;
+    const view = $('#scView'); if (view) { view.dataset.hit = v.level; clearTimeout(SC.hitT); SC.hitT = setTimeout(() => { const vv = $('#scView'); if (vv) vv.dataset.hit = ''; }, 1600); }
+    return { level: v.level, beep };
+  }
+  function dropFrame(it) { if (it.thumb) { try { URL.revokeObjectURL(it.thumb); } catch (e) {} } it.thumb = null; it.frame = null; }
+  function trimFrames() { const withF = SC.items.filter(x => x.frame); for (let i = TUNE.keepFrames; i < withF.length; i++) dropFrame(withF[i]); }
+
+  /* ---------- drawing the screen ---------- */
+  const plateHtml = it => `<span class="plate">${esc(it.plate)}</span>${it.state ? `<span class="sc-st">${esc(it.state)}</span>` : ''}`;
+  function printBtn(it) {
+    const kit = k(); if (!kit) return '';
+    if (it.printed) return `<button class="sc-b quiet" data-sc="print" data-id="${it.id}">Print again</button>`;
+    return kit.supported() ? `<button class="sc-b go" data-sc="print" data-id="${it.id}">Print notice</button>` : `<button class="sc-b" data-sc="printhelp">How to print</button>${it.cited && it.citeId ? `<button class="sc-b quiet" data-sc="printsys" data-id="${it.id}">Print dialog</button>` : ''}`;
+  }
+  function actionsHtml(it) {
+    if (it.cited) return `<span class="sc-done">Notice ${esc(it.cited)} issued${it.printed ? ' and printed' : ''}</span>${printBtn(it)}`;
+    const ok = it.level === 'ok';
+    return `<button class="sc-b ${ok ? 'quiet' : 'go'}" data-sc="notice" data-id="${it.id}">${ok ? 'Issue anyway' : 'Issue notice'}</button><button class="sc-b quiet" data-sc="dismiss" data-id="${it.id}">${ok ? 'Next' : 'Dismiss'}</button>`;
+  }
+  function flagsHtml(it) {
+    const low = !it.manual && it.score < TUNE.lowScore;
+    return `${low ? `<span class="sc-flag">Not sure of this read (${Math.round(it.score * 100)}%). Check the plate on the vehicle</span>` : ''}${it.towEligible ? `<span class="sc-flag bad">Boot or tow eligible${it.hot ? ': hot list' : ': 3+ open notices'}</span>` : ''}${it.manual ? '<span class="sc-flag">Typed in</span>' : ''}`
+      + (low && it.alts && it.alts.length && !it.cited ? `<div class="sc-alts">Could also be:${it.alts.map(a => `<button data-sc="use" data-id="${it.id}" data-plate="${esc(a)}">${esc(a)}</button>`).join('')}</div>` : '');
+  }
+  const WORD = { bad: 'Violation', warn: 'Check', ok: 'OK' };
+  function curHtml() {
+    const it = SC.cur; if (!it) return HX.demo ? '<div class="sc-empty">Nothing read yet. Hold steady and the plate in the box is read on its own. Tap Next car for another vehicle, or type any plate below.</div>' : '<div class="sc-empty">Nothing read yet. Hold the box over a plate, or type one below.</div>';
+    const fresh = SC.curFresh; SC.curFresh = false;
+    return `<div class="sc-cur ${it.level}${fresh ? ' fresh' : ''}"><div class="sc-head"><span class="sc-word">${WORD[it.level]}</span>${plateHtml(it)}</div><h2>${esc(it.title)}</h2>
+      ${it.lines.length ? `<ul>${it.lines.slice(0, 3).map(l => `<li>${esc(l)}</li>`).join('')}</ul>` : ''}<div>${flagsHtml(it)}</div><div class="sc-acts">${actionsHtml(it)}</div></div>`;
+  }
+  function rowHtml(it) {
+    return `<li class="sc-row ${it.level}"><div class="sc-row-h">${it.thumb ? `<img class="thumb" alt="Camera frame for ${esc(it.plate)}" src="${it.thumb}">` : ''}${plateHtml(it)}<div class="grow"><b>${esc(it.title)}</b><span class="sub">${hhmm(it.at)}${it.n > 1 ? ' · seen ' + it.n + ' times' : ''}</span></div></div>
+      <div>${flagsHtml(it)}</div><div class="sc-acts">${actionsHtml(it)}</div></li>`;
+  }
+  const shown = () => SC.items.filter(x => !x.dismissed && x !== SC.cur && (SC.filter === 'all' || x.level !== 'ok' || x.cited));
+  function renderList() {
+    const el = $('#scList'); if (!el) return;
+    const rows = shown();
+    el.innerHTML = rows.length ? rows.map(rowHtml).join('') : `<li class="sc-empty">${SC.filter === 'all' ? 'No vehicles yet.' : 'No problems so far. Vehicles that are fine are counted above.'}</li>`;
+    document.querySelectorAll('#scFilter button').forEach(b => b.setAttribute('aria-pressed', b.dataset.f === SC.filter));
+  }
+  function renderSum() {
+    const el = $('#scSum'); if (!el) return;
+    const c = SC.counts, pct = SC.cap ? SC.used / SC.cap : 0;
+    el.innerHTML = `<span>${c.checked} checked · ${c.flagged} flagged · ${c.notices} notice${c.notices === 1 ? '' : 's'}</span>${SC.used != null ? `<span class="${pct >= .8 ? 'hot' : ''}">${SC.used.toLocaleString()} of ${SC.cap.toLocaleString()} scans this month</span>` : ''}`;
+  }
+  const unhandled = () => SC.items.filter(x => x.level !== 'ok' && !x.dismissed && !x.cited).length;
+  function renderTop() {
+    const f = facById(SC.facId), sel = $('#scFac'); if (sel && sel.value !== SC.facId) sel.value = SC.facId;
+    const z = $('#scZone'); if (z) { const res = f && +f.reservedSpaces > 0; z.hidden = !res; z.innerHTML = res ? `<button class="sc-btn" data-sc="zone" data-v="general" aria-pressed="${UI.enfZone !== 'reserved'}">General</button><button class="sc-btn" data-sc="zone" data-v="reserved" aria-pressed="${UI.enfZone === 'reserved'}">Reserved section</button>` : ''; z.querySelectorAll('[aria-pressed=true]').forEach(b => b.classList.add('on')); }
+    const p = $('#scPrinter'), kit = k(); if (p && kit) {
+      if (kit.connected()) { p.textContent = 'Printer: ' + kit.name(); p.className = 'sc-btn on'; p.disabled = true; }
+      else if (kit.supported()) { p.textContent = kit.remembered() ? 'Reconnect printer' : 'Connect printer'; p.className = 'sc-btn pri'; p.disabled = false; }
+      else { p.textContent = 'Printing: how'; p.className = 'sc-btn'; p.disabled = false; }
+    }
+    const pause = $('#scPause'); if (pause) pause.textContent = SC.paused ? 'Resume' : 'Pause';
+    const mode = $('#scMode'); if (mode) mode.textContent = SC.mode === 'fast' ? 'Every second' : 'Auto';
+    const snd = $('#scSound'); if (snd) snd.textContent = SC.sound ? 'Sound on' : 'Sound off';
+    const done = $('#scDone'); if (done) { const open = unhandled(); done.textContent = SC.armLeave ? `Leave with ${open} unhandled?` : 'Done'; done.className = 'sc-btn' + (SC.armLeave ? ' pri' : ''); }
+  }
+  function renderAll() { const cur = $('#scCur'); if (cur) cur.innerHTML = curHtml(); renderList(); renderSum(); renderTop(); }
+
+  /* ---------- notice ---------- */
+  const dupOf = (pl, facId, code) => S.citations.find(c => normPlate(c.plate) === pl && c.facilityId === facId && c.violation === code && now() - c.issuedAt < D && c.status !== 'voided');
+  async function uploadFrame(it) {
+    if (!it.frame) return [];
+    try { const r = await HX.api('POST', '/api/photos?plate=' + encodeURIComponent(it.plate), it.frame, 'image/jpeg'); return r && r.id ? [r.id] : []; } catch (e) { return []; }
+  }
+  async function printCite(it, c) {
+    const kit = k(); if (!kit || !kit.supported() || !c) return false;
+    try { await kit.send(kit.zpl()(c)); it.printed = true; return true; }
+    catch (e) { if (e.name !== 'NotFoundError' && e.name !== 'AbortError') note('Printing failed: ' + e.message); return false; }
+  }
+  function noticeForm(it) {
+    const vs = violations(), kit = k(), willPrint = !!(kit && kit.supported() && kit.remembered());
+    const sure = it.manual ? 'You typed this plate.' : `Read by the camera as ${it.plate} (${Math.round(it.score * 100)}% sure).`;
+    openForm({ title: 'Notice for ' + it.plate, submit: willPrint ? 'Issue and print' : 'Issue notice', fields: [
+      { id: 'sure', type: 'note', label: sure + ' Check that it matches the plate on the vehicle before you issue.' },
+      { id: 'plate', label: 'Plate', value: it.plate, required: true },
+      { id: 'state', label: 'Plate state', value: it.state || '', help: 'Two letters, for example TX' },
+      { id: 'code', label: 'Violation', type: 'select', span: true, options: vs.map(v => [v.code, `${v.name} · ${money0(v.fine)}`]), value: it.suggest || (vs[0] && vs[0].code) },
+      { id: 'notes', label: 'Notes', span: true, value: '', help: 'Row, space, vehicle color' },
+    ], onSubmit: async v => {
+      const pl = normPlate(v.plate); if (pl.length < 2) return 'Enter the plate.';
+      if (pl !== it.plate) { const r2 = verdictOf(pl, it.facId); if (r2.level === 'ok') return `${pl} is fine (${r2.title}). Check the plate again.`; }
+      const dup = dupOf(pl, it.facId, v.code); if (dup) return `${pl} already has this notice today (${dup.number}).`;
+      const photoIds = await uploadFrame(it);
+      const ok = await issueCitation({ plate: pl, facId: it.facId, code: v.code, officer: actorName(), notes: (v.notes || '').trim(), plateState: v.state, photoIds });
+      if (!ok) return 'Couldn’t save the notice. Check the connection and try again.';
+      const c = byId('citations', UI.lastCite); UI.lastCite = null;
+      it.cited = c ? c.number : 'issued'; it.citeId = c && c.id; SC.counts.notices++; dropFrame(it);
+      if (pl !== it.plate) { SC.byKey.delete(it.key); it.plate = pl; it.key = it.facId + '|' + pl; SC.byKey.set(it.key, it); }
+      if (willPrint) await printCite(it, c);
+      renderAll(); return true;
+    } });
+  }
+  const itemOf = el => SC.items.find(x => String(x.id) === String(el.dataset.id));
+
+  /* ---------- opening and closing ---------- */
+  function shell() {
+    const f = S.facilities;
+    const d = document.createElement('div'); d.className = 'scan'; d.id = 'scan'; d.setAttribute('role', 'dialog'); d.setAttribute('aria-modal', 'true'); d.setAttribute('aria-label', 'Plate scanner');
+    d.innerHTML = `<header class="scan-top"><select id="scFac" aria-label="Location">${f.map(x => `<option value="${esc(x.id)}">${esc(x.name)}</option>`).join('')}</select>
+      <button class="sc-btn" id="scPrinter" data-sc="printer"></button><button class="sc-btn" id="scDone" data-sc="done">Done</button></header>
+      <div class="scan-note" id="scNote" role="status" hidden></div>
+      <div class="scan-body"><section class="scan-view${HX.demo ? ' is-demo' : ''}" id="scView" data-hit="" data-busy="0">
+        ${HX.demo ? '<canvas id="scVideo" class="demo-cam" width="1280" height="720" aria-label="Demo camera"></canvas><div class="sc-demo-chip" id="scDemo">Demo camera</div>' : '<video id="scVideo" playsinline muted autoplay></video>'}<div class="reticle" id="scReticle" aria-hidden="true"><i></i><i></i><i></i><i></i></div>
+        <div class="scan-status" id="scStatus" role="status" aria-live="polite">Starting camera…</div>
+        <div class="scan-msg" id="scMsg" hidden></div>
+        <div class="scan-ctl">${HX.demo ? '<button class="sc-btn pri" data-sc="demonext">Next car</button>' : ''}<button class="sc-btn" data-sc="read">Read now</button><button class="sc-btn" id="scPause" data-sc="pause">Pause</button><button class="sc-btn" id="scMode" data-sc="mode">Auto</button><button class="sc-btn" id="scTorch" data-sc="torch" hidden>Light</button><button class="sc-btn" id="scSound" data-sc="sound">Sound on</button></div></section>
+      <section class="scan-side"><div id="scZone" class="sc-zone" hidden></div><div id="scCur"></div>
+        <form class="scan-manual" id="scManual"><input id="scPlate" autocomplete="off" autocapitalize="characters" autocorrect="off" spellcheck="false" inputmode="text" enterkeyhint="go" maxlength="10" placeholder="Or type a plate" aria-label="Type a plate"><button class="sc-b go">Check</button></form>
+        <div class="scan-sum" id="scSum"></div><div class="sc-filter" id="scFilter"><button data-sc="filter" data-f="problems">Problems</button><button data-sc="filter" data-f="all">All</button></div>
+        <ul class="scan-list" id="scList" aria-live="polite"></ul></section></div>`;
+    return d;
+  }
+  function showMsg(html) { const m = $('#scMsg'); if (!m) return; m.hidden = !html; m.innerHTML = html || ''; }
+  const camError = e => {
+    const n = e && e.name;
+    if (!window.isSecureContext && location.hostname !== 'localhost') return 'The camera only works on a secure (https) address.';
+    if (n === 'NotAllowedError' || n === 'SecurityError') return IOSDEV() ? 'The camera is blocked. Open Settings on the iPhone or iPad, find this browser (Safari or Bluefy), turn on Camera, then tap Try again.' : 'The camera is blocked. Allow the camera for this site in the browser, then tap Try again.';
+    if (n === 'NotFoundError' || n === 'OverconstrainedError') return 'No camera was found on this device. You can still type plates below.';
+    if (n === 'NotReadableError') return 'Another app is using the camera. Close it, then tap Try again.';
+    return 'Couldn’t start the camera. Tap Try again.';
+  };
+  async function startCamera() {
+    stopCamera(); showMsg('');
+    if (HX.demo) { HX.demo.start(SC.video); SC.prevSig = null; SC.lastSig = null; SC.sharpRef = 0; setStatus('Hold the box over a plate'); return true; }
+    if (!supportsCamera()) { showMsg(`<p style="margin:0">This browser can’t use the camera for scanning.</p><button class="sc-b" data-sc="done">Close</button>`); return false; }
+    let err;
+    for (const c of [{ video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } }, audio: false }, { video: true, audio: false }]) {
+      try { SC.stream = await navigator.mediaDevices.getUserMedia(c); break; } catch (e) { err = e; if (e.name === 'NotAllowedError' || e.name === 'SecurityError') break; }
+    }
+    if (!SC.stream) { setStatus('Camera off', true); showMsg(`<p style="margin:0">${esc(camError(err))}</p><button class="sc-b go" data-sc="retry">Try again</button>`); return false; }
+    if (!SC.open) { stopCamera(); return false; }
+    const v = SC.video; v.srcObject = SC.stream; v.muted = true; v.setAttribute('playsinline', '');
+    try { await v.play(); } catch (e) {}
+    SC.track = SC.stream.getVideoTracks()[0];
+    try { await SC.track.applyConstraints({ advanced: [{ focusMode: 'continuous' }] }); } catch (e) {}
+    try { const caps = SC.track.getCapabilities ? SC.track.getCapabilities() : {}; const t = $('#scTorch'); if (t) t.hidden = !caps.torch; } catch (e) {}
+    SC.prevSig = null; SC.lastSig = null; SC.sharpRef = 0; setStatus('Hold the box over a plate');
+    return true;
+  }
+  function stopCamera() { if (HX.demo) HX.demo.stop(); if (SC.stream) SC.stream.getTracks().forEach(t => { try { t.stop(); } catch (e) {} }); SC.stream = null; SC.track = null; if (SC.video) SC.video.srcObject = null; }
+  async function wake() { try { if (navigator.wakeLock && !SC.lock) { SC.lock = await navigator.wakeLock.request('screen'); SC.lock.addEventListener('release', () => { SC.lock = null; }); } } catch (e) {} }
+
+  async function open() {
+    if (SC.open) return;
+    if (!HX.scan || !HX.scan.on) { toast('Camera scanning isn’t set up yet. Type the plate instead.', true); return; }
+    if (!S.facilities.length) return;
+    SC.open = true; SC.facId = facById(UI.enfFac) ? UI.enfFac : S.facilities[0].id;
+    Object.assign(SC, { items: [], byKey: new Map(), cur: null, filter: 'problems', paused: false, disabled: false, counts: { checked: 0, flagged: 0, notices: 0 }, inflight: 0, lastSend: 0, lastSig: null, prevSig: null, sharpRef: 0, retries: 0, lastEmpty: false, fails: 0, backoffUntil: 0, armLeave: false, sent: 0, movingRun: 0, panned: false, used: SC.used, cap: SC.cap });
+    try { const AC = window.AudioContext || window.webkitAudioContext; if (AC) { SC.audio = new AC(); if (SC.audio.state === 'suspended') SC.audio.resume(); } } catch (e) {}
+    const el = shell(); document.body.appendChild(el); document.body.classList.add('scan-on');
+    const hdr = document.querySelector('header.top'), main = $('#main'); if (hdr) hdr.inert = true; if (main) main.inert = true;
+    SC.el = el; SC.video = $('#scVideo'); SC.reticle = $('#scReticle');
+    const gc = document.createElement('canvas'); gc.width = GW; gc.height = GH; SC.gctx = gc.getContext('2d', { willReadFrequently: true }); SC.sendCanvas = document.createElement('canvas');
+    $('#scFac').value = SC.facId; renderAll(); wake();
+    SC.timer = setInterval(tick, TUNE.tickMs);
+    await startCamera();
+  }
+  function close() {
+    if (!SC.open) return;
+    SC.open = false; clearInterval(SC.timer); clearTimeout(SC.hitT); stopCamera();
+    try { if (SC.lock) SC.lock.release(); } catch (e) {} SC.lock = null;
+    try { if (SC.audio) SC.audio.close(); } catch (e) {} SC.audio = null;
+    SC.items.forEach(dropFrame); SC.items = []; SC.byKey = new Map(); SC.cur = null;
+    if (SC.el) SC.el.remove(); SC.el = null; SC.video = null; SC.reticle = null;
+    document.body.classList.remove('scan-on');
+    const hdr = document.querySelector('header.top'), main = $('#main'); if (hdr) hdr.inert = false; if (main) main.inert = false;
+    render();
+  }
+  document.addEventListener('visibilitychange', () => { if (!SC.open || document.hidden) return; wake(); if (SC.track && SC.track.readyState !== 'live') startCamera(); else if (SC.video && SC.video.play) SC.video.play().catch(() => {}); });
+  window.addEventListener('pagehide', () => { if (SC.open) stopCamera(); });
+  if (k()) k().onChange(() => { if (SC.open) { renderTop(); renderList(); const cur = $('#scCur'); if (cur) cur.innerHTML = curHtml(); } });
+
+  /* ---------- taps ---------- */
+  document.addEventListener('click', async e => {
+    const root = e.target.closest('#scan'); if (!root) return;
+    const b = e.target.closest('[data-sc]');
+    if (!b) { if (e.target.closest('#scView') && !e.target.closest('.scan-ctl,.scan-msg') && SC.video && !SC.disabled) readNow(); return; }
+    const a = b.dataset.sc, it = b.dataset.id ? itemOf(b) : null;
+    if (a !== 'done' && SC.armLeave) { SC.armLeave = false; renderTop(); }
+    if (a === 'done') { const open = unhandled(); if (open && !SC.armLeave) { SC.armLeave = true; renderTop(); clearTimeout(SC.armT); SC.armT = setTimeout(() => { SC.armLeave = false; renderTop(); }, 4000); } else close(); }
+    else if (a === 'retry') startCamera();
+    else if (a === 'demonext') { HX.demo.next(); SC.lastEmpty = false; setStatus('Next car'); }
+    else if (a === 'read') readNow();
+    else if (a === 'pause') { SC.paused = !SC.paused; renderTop(); }
+    else if (a === 'mode') { SC.mode = SC.mode === 'fast' ? 'auto' : 'fast'; SC.lastSig = null; renderTop(); }
+    else if (a === 'sound') { SC.sound = !SC.sound; store.set('scanSound', SC.sound ? '1' : '0'); renderTop(); if (SC.sound) tone(900, 80, 0, .1); }
+    else if (a === 'torch' && SC.track) { SC.torch = !SC.torch; try { await SC.track.applyConstraints({ advanced: [{ torch: SC.torch }] }); } catch (x) { SC.torch = false; } b.textContent = SC.torch ? 'Light on' : 'Light'; }
+    else if (a === 'filter') { SC.filter = b.dataset.f; renderList(); }
+    else if (a === 'zone') { UI.enfZone = b.dataset.v; renderTop(); }
+    else if (a === 'printer') { const kit = k(); if (kit && kit.supported()) { b.disabled = true; try { await kit.connect(); } catch (x) { if (x.name !== 'NotFoundError' && x.name !== 'AbortError') note(x.message); } b.disabled = false; renderTop(); } else window.printHelpDialog(); }
+    else if (a === 'printhelp') window.printHelpDialog();
+    else if (a === 'printsys' && it && it.citeId) ACT.printSys({ dataset: { id: it.citeId } });
+    else if (a === 'notice' && it) noticeForm(it);
+    else if (a === 'dismiss' && it) { it.dismissed = true; if (SC.cur === it) SC.cur = SC.items.find(x => !x.dismissed && x !== it) || null; renderAll(); }
+    else if (a === 'print' && it) { const c = byId('citations', it.citeId); b.disabled = true; await printCite(it, c); renderAll(); }
+    else if (a === 'use' && it) { const pl = normPlate(b.dataset.plate); if (pl) { SC.byKey.delete(it.key); const v = verdictOf(pl, it.facId); Object.assign(it, { plate: pl, key: it.facId + '|' + pl, alts: [], score: 1, level: v.level, title: v.title, lines: v.lines || [], suggest: v.suggest, towEligible: !!v.towEligible, hot: !!v.hot }); SC.byKey.set(it.key, it); SC.cur = it; alertFor(v.level); renderAll(); } }
+  });
+  document.addEventListener('submit', e => {
+    if (!e.target.closest('#scManual')) return; e.preventDefault();
+    const inp = $('#scPlate'), pl = normPlate(inp.value); if (pl.length < 2) { inp.focus(); return; }
+    inp.value = ''; const r = addRead({ plate: pl, score: 1, state: '', manual: true });
+    if (r) alertFor(r.level); renderAll();
+  });
+  document.addEventListener('change', e => { if (e.target.id !== 'scFac' || !SC.open) return; SC.facId = e.target.value; UI.enfFac = SC.facId; store.set('enfFac', SC.facId); SC.lastSig = null; renderTop(); });
+  async function readNow() {
+    if (!SC.open || SC.disabled || SC.inflight >= TUNE.maxInflight + 1 || !SC.video || !SC.video.videoWidth) { setStatus(SC.inflight ? 'Still reading…' : 'Camera isn’t ready'); return; }
+    const r = cropRect(); if (!r) return; SC.paused = false; SC.retries = 0; SC.lastSig = null; send('read', r);
+  }
+
+  /* ---------- the enforcement screen and Settings ---------- */
+  window.scanCard = () => {
+    if (!can('citations')) return '';
+    const on = !!(HX.scan && HX.scan.on), cam = supportsCamera(), kit = k();
+    return (HX.demo ? HX.demo.introHtml() : '') + `<section class="panel scancard"><div class="panel-b" style="display:grid;gap:10px"><div class="row" style="justify-content:space-between;align-items:center;gap:12px"><div><h3>Scan plates with the camera</h3>
+      <p class="note" style="margin:2px 0 0">Walk the lot with the phone pointed at plates. Each one is checked and flagged on the spot.</p></div>
+      <button class="btn pri lg" data-act="scanStart" data-perm="citations" ${on && cam ? '' : 'disabled'}>Start scanning</button></div>
+      ${!on ? '<p class="note" style="margin:0">Camera scanning isn’t switched on for this account yet (the owner can do this under Settings). You can still type plates below.</p>' : !cam ? '<p class="note" style="margin:0">This browser can’t use the camera here. Type plates below.</p>' : ''}
+      ${kit && kit.ios && !kit.supported() ? '<p class="note" style="margin:0">To print notices from an iPhone or iPad, open ParkOps in the free Bluefy app. <button type="button" class="btn sm" data-act="printHelp">How</button></p>' : ''}</div></section>`;
+  };
+  window.scanSettings = () => {
+    if (!can('settings')) return '';
+    if (UI.scanStat === undefined) { UI.scanStat = null; HX.api('GET', '/api/admin/scan').then(d => { UI.scanStat = d; schedule(); }).catch(e => { UI.scanStat = { error: e.message }; schedule(); }); }
+    const d = UI.scanStat, pct = d && d.cap ? Math.min(100, Math.round(d.used / d.cap * 100)) : 0;
+    return `<section class="panel"><div class="panel-h"><h2>Plate scanning (camera)</h2>${d && d.configured ? '<span class="pill ok">On</span>' : d ? '<span class="pill">Off</span>' : ''}<button class="btn sm" data-act="scanRefresh">Refresh</button></div><div class="panel-b" style="display:grid;gap:10px;font-size:.9rem">
+      ${!d ? 'Loading…' : d.error ? esc(d.error) : !d.configured ? `<p style="margin:0">Officers can scan plates with an iPhone, iPad or Android phone, and ParkOps checks each one for violations. It needs a plate-reading service, which charges a fraction of a cent per scan. Until it’s set up, officers type plates instead.</p>
+        <ol style="margin:0;padding-left:20px;display:grid;gap:4px"><li>Make an account at <b>platerecognizer.com</b> and copy your API token.</li><li>In Render, open the parkops service → Environment, add <span class="mono">PLATE_RECOGNIZER_TOKEN</span> with that token, and save.</li><li>Optional: add <span class="mono">SCAN_MONTHLY_CAP</span> to set the most scans allowed per month (default 60,000).</li></ol>`
+      : `<div><b>This month:</b> ${d.used.toLocaleString()} of ${d.cap.toLocaleString()} scans</div><div class="bar ${pct >= 100 ? 'bad' : pct >= 80 ? 'warn' : ''}" role="img" aria-label="${pct}% of the monthly scan limit used"><i style="width:${pct}%"></i></div>
+        <div class="note" style="margin:0">Scanning stops at the limit (typing plates keeps working), and you get an email at 80% and at 100%. Change the limit with <span class="mono">SCAN_MONTHLY_CAP</span> in Render. Plate region: ${esc((d.regions || []).join(', ') || 'us')}.</div>
+        ${d.days && d.days.length ? `<div class="tbl-wrap"><table><thead><tr><th>Day</th><th class="r">Scans</th></tr></thead><tbody>${d.days.slice(-8).reverse().map(x => `<tr><td>${esc(x.day)}</td><td class="r num">${(+x.n).toLocaleString()}</td></tr>`).join('')}</tbody></table></div>` : ''}
+        ${d.reader ? `<div class="note" style="margin:0">Since the server last restarted: ${d.reader.sent} frames sent, ${d.reader.ok} with a plate, ${d.reader.empty} with none, ${d.reader.failed} failed${d.reader.throttled ? ', ' + d.reader.throttled + ' slowed down by the service' : ''}.</div>` : ''}`}
+      <div class="note" style="margin:0">Frames of the plate area are sent to the plate-reading service to be read. ParkOps itself keeps a frame only when an officer issues a notice, as evidence with that notice.</div></div></section>`;
+  };
+  Object.assign(ACT, { scanStart() { open(); }, scanRefresh() { UI.scanStat = undefined; render(); } });
+  window.scanKit = { TUNE, analyse, sigDiff, open, close, readNow, get state() { return SC; } };
 })();
 
 </script>

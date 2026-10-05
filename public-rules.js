@@ -630,6 +630,8 @@
             const cap = round2(paidOf(s) + amt - (+s.lateFee || 0) - extrasOf(s)), recent = charge(facFor(s), s.startAt, Math.max(s.startAt, t - 10 * M), s.validation);
             if (cd.fee > cap && cap >= recent - 0.005) { cd.feeQuoted = cd.fee; cd.fee = cap; }
           }
+          /* A staff member without manager rights can close a ticket only by collecting everything owed, so a token $1 can't be used to wave a car out. */
+          if (a.requireFull && !s.waived && round2((+cd.fee || 0) + extrasOf(s) + (+s.lateFee || 0) - paidOf(s) - amt) > 0.004) return { error: 'Only a manager or owner can close a ticket with money still owed. Collect the full amount, or ask a manager.' };
           Object.assign(data, cd); detail += ' · departed';
         }
         data.history = histAdd(s, { action: 'payment', by: a.by, detail });
@@ -644,6 +646,11 @@
         if (now() - at > 15 * M && !a.allowBackdate) return { error: 'A departure more than 15 minutes ago needs a manager (it changes the fee).' };
         const data = closeData(s, at);
         const bal = Math.max(0, round2(data.fee + extrasOf(s) + (+s.lateFee || 0) - paidOf(s)));
+        /* Letting a car out with money still owed is a manager or owner decision, and it always needs a reason. */
+        if (bal > 0 && !s.waived) {
+          if (!a.allowUnpaid) return { error: 'Only a manager or owner can let a car out with money owed. Collect the payment, apply a validation code, or ask a manager.' };
+          if (!String(a.reason || '').trim()) return { error: 'Give a reason for letting this car out unpaid (it is kept in the audit trail).' };
+        }
         data.history = histAdd(s, { action: 'departed', by: a.by, detail: (a.reason ? a.reason + ' · ' : '') + (bal > 0 && !s.waived ? money(bal) + ' left unpaid' : 'nothing owed') + (Math.abs(at - now()) > M ? ' · time set to ' + fmtLocal(at, fac(s.facilityId)) : '') });
         return { ops: [{ type: 'update', coll: 'sessions', id: s.id, data }], balance: s.waived ? 0 : bal };
       },
@@ -770,7 +777,8 @@
         const plates = String(a.plates || '').split(',').map(normPlate).filter(Boolean).slice(0, +plan.maxVehicles || 3);
         if (!name || !/.+@.+\..+/.test(email) || !plates.length) return { error: 'Add your name, email and at least one plate.' };
         if (L('permits').some(p => p.permitTypeId === plan.id && String(p.email || '').toLowerCase() === email && ['active', 'pending', 'waitlist', 'suspended'].includes(p.status) && !p.endAt)) return { error: 'You already have this monthly plan or are on its waitlist.' };
-        const full = +plan.quota && soldOf(plan) >= +plan.quota, number = String(10000 + Math.floor(Math.random() * 89999));
+        const full = +plan.quota && soldOf(plan) >= +plan.quota, number = newMonthlyNumber();
+        if (a.companyId) { const rm = accountRoom(a.companyId, plan.id, { adding: full ? 0 : 1 }); if (rm.error) return { error: rm.error }; const dup = plates.find(pl => permitsForPlate(pl).some(p => ['active', 'approved', 'pending', 'suspended'].includes(p.status) && (!p.endAt || p.endAt > now()))); if (dup) return { error: dup + ' is already on a monthly plan.' }; }
         const f = fac((plan.facilities || [])[0]) || L('facilities')[0], mb = monthBounds(now(), f);
         const first = full ? 0 : round2(+plan.price * (mb.end - now()) / (mb.end - mb.start));
         const data = { number, holder: name, email, phone: String(a.phone || ''), permitTypeId: plan.id, plates, status: full ? 'waitlist' : 'active', billing: a.companyId ? 'company' : 'card', companyId: a.companyId || null, companyName: a.companyName || '', accountId: a.accountId || null, createdAt: now(), startAt: full ? null : now(), endAt: null, paidThrough: full ? null : mb.end, source: a.source || 'portal', firstPaymentId: first > 0 && !a.companyId ? '__PAY__' : null };
@@ -872,6 +880,55 @@
     }
     /* First, partial month: the plan price times the share of the month left. */
     const prorate = plan => { const mb = monthBounds(now(), fac((plan.facilities || [])[0]) || L('facilities')[0]); return round2(+plan.price * (mb.end - now()) / (mb.end - mb.start)); };
+
+    /* ---------- accounts: a company, building or garage that manages its own block of monthly parkers ----------
+       An account can be tied to locations, limited to certain plans and capped at a number of parkers. These checks run on the
+       server for the console, spreadsheet imports, the account link and the driver portal, and again in the pilot page. */
+    const HOLDS_SPACE = ['active', 'suspended', 'approved', 'pending'];
+    const holdsSpace = p => HOLDS_SPACE.includes(p.status) && (!p.endAt || p.endAt > now());
+    /* A monthly number nobody else has. extra: numbers already handed out in the same batch (not saved yet). */
+    function newMonthlyNumber(extra) { const have = new Set(L('permits').map(p => String(p.number))); let n, k = 0; do { n = String(k++ < 40 ? 10000 + Math.floor(Math.random() * 89999) : 1000000 + Math.floor(Math.random() * 8999999)); } while (have.has(n) || (extra && extra.has(n))); if (extra) extra.add(n); return n; }
+    function accountUsed(companyId, excludeId) { let n = 0; for (const p of L('permits')) if (p.companyId === companyId && p.id !== excludeId && holdsSpace(p)) n++; return n; }
+    /* Can this account take `adding` more parkers on this plan? o.used lets a caller that is adding many keep its own running count. */
+    function accountRoom(companyId, planId, o) {
+      o = o || {}; const co = L('companies').find(c => c.id === companyId); if (!co) return {};
+      const plan = ptype(planId), max = +co.maxParkers || 0, used = o.used != null ? o.used : accountUsed(companyId, o.exclude), adding = o.adding == null ? 1 : o.adding;
+      const ids = Array.isArray(co.planIds) ? co.planIds : [], locs = Array.isArray(co.facilityIds) ? co.facilityIds : [], names = list => list.map(i => (ptype(i) || fac(i) || {}).name).filter(Boolean).join(', ');
+      if (plan && ids.length && !ids.includes(plan.id)) return { error: co.name + ' isn’t set up for the ' + plan.name + ' plan. Its plans: ' + (names(ids) || 'none') + '.', used, max };
+      if (plan && locs.length && (plan.facilities || []).length && !(plan.facilities || []).some(f => locs.includes(f))) return { error: 'The ' + plan.name + ' plan isn’t at ' + co.name + '’s location (' + names(locs) + ').', used, max };
+      if (max && adding > 0 && used + adding > max) return { error: co.name + ' is at its limit of ' + max + ' parker' + (max === 1 ? '' : 's') + ' (' + used + ' in use). Raise the limit on the account to add more.', used, max };
+      return { used, max, left: max ? Math.max(0, max - used) : null };
+    }
+    /* Add many parkers to one account at once (a pasted list or spreadsheet). Pure: returns what would be saved, row by row.
+       rows: [{ name, email, phone, plates, plan? }]; a.planId is the plan for rows that don't name one. a.prorate puts the rest of this
+       month on the account's next bill. a.staff lets the office use plans that aren't sold online. */
+    function planAccountParkers(a) {
+      const co = L('companies').find(c => c.id === a.companyId); if (!co) return { error: 'Account not found.' };
+      const rows = Array.isArray(a.rows) ? a.rows.slice(0, 1000) : [], norm = x => String(x || '').trim().toLowerCase(), created = [], skipped = [], ops = [];
+      const defPlan = a.planId ? ptype(a.planId) : null, taken = new Map(), numbers = new Set(), sold = {}; let used = accountUsed(co.id);
+      for (const p of L('permits')) { numbers.add(String(p.number)); if (['active', 'approved', 'pending', 'suspended'].includes(p.status) && (!p.endAt || p.endAt > now())) (p.plates || []).forEach(pl => taken.set(normPlate(pl), p.number)); }
+      const nextNumber = () => { let n, k = 0; do { n = String(k++ < 40 ? 10000 + Math.floor(Math.random() * 89999) : 1000000 + Math.floor(Math.random() * 8999999)); } while (numbers.has(n)); numbers.add(n); return n; };
+      rows.forEach((r, i) => {
+        const line = i + 1, holder = String(r.name || r.holder || '').trim().slice(0, 80), plates = [...new Set(String(r.plates || r.plate || '').split(/[,;|\s]+/).map(normPlate).filter(Boolean))];
+        const key = r.plan || r.planId || r.type, plan = key ? L('permitTypes').find(t => t.id === key || norm(t.name) === norm(key)) : defPlan;
+        if (!holder) return skipped.push({ line, reason: 'No name' });
+        if (!plates.length) return skipped.push({ line, reason: 'No license plate' });
+        if (!plan) return skipped.push({ line, reason: key ? 'Unknown plan “' + key + '”' : 'No plan chosen' });
+        if (!a.staff && plan.active === false) return skipped.push({ line, reason: plan.name + ' isn’t open for sign-up' });
+        const dup = plates.find(pl => taken.has(pl)); if (dup) return skipped.push({ line, reason: dup + ' is already on monthly #' + taken.get(dup) });
+        if (sold[plan.id] == null) sold[plan.id] = +plan.quota ? soldOf(plan) : 0;
+        const full = +plan.quota && sold[plan.id] >= +plan.quota, room = accountRoom(co.id, plan.id, { used, adding: full ? 0 : 1 });
+        if (room.error) return skipped.push({ line, reason: room.error });
+        const f = fac((plan.facilities || [])[0]) || L('facilities')[0], mb = monthBounds(now(), f), email = norm(r.email).slice(0, 200), number = nextNumber();
+        const data = { number, holder, email: /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email) ? email : '', phone: String(r.phone || '').trim().slice(0, 30), permitTypeId: plan.id, plates: plates.slice(0, +plan.maxVehicles || 3), companyId: co.id, companyName: co.name, billing: 'company', accountId: null,
+          status: full ? 'waitlist' : 'active', createdAt: now(), startAt: full ? null : now(), endAt: null, paidThrough: full ? null : mb.end, source: a.source || 'account', notes: String(r.notes || '').slice(0, 300) };
+        if (!full && a.prorate) data.prorateDue = round2(+plan.price * (mb.end - now()) / (mb.end - mb.start));
+        plates.forEach(pl => taken.set(pl, number)); if (full) sold[plan.id]++; else { sold[plan.id]++; used++; }
+        created.push({ line, holder, plates: data.plates, plan: plan.name, status: data.status, email: data.email });
+        ops.push({ type: 'set', coll: 'permits', id: uid('p'), data });
+      });
+      return { created, skipped, ops };
+    }
     const sessionByToken = tok => L('sessions').find(s => tok && s.extendToken === tok && !s.endAt);
 
     function lookup(plate) {
@@ -890,7 +947,7 @@
       };
     }
 
-    return { ROLES, ROLE_NAMES, METHODS, can, canonRole, ticketOf, ticketNo, snapRates, facFor, histAdd, endOfDate, ticketBill, extrasOf, freeKind, validPermitFor, vipForPlate, sessionsForCode, codeOccupancy, arAging, vehicleProfile, validationText, staleHours, TICKET, prorate, priceDetail, rateSummary, taxOf, specialQualifies, monthBounds, planMonthlyDue, sessionByToken, needsReview, cfg, plateDebt, isHot, hotList, planCollections, resAvailability, reservationFor, activeReservation, planNoShows, resActive, resPlates, M, H, D, normPlate, canon, uid, round2, money, sum, now, fac, ptype, tenant, camera, tzOf, dayStart, nextDayStart, charge, paidOf, sessionFee, balanceOf, isLive, onSiteSessions, occupancy, permitValid, permitCovers, permitsForPlate, memberForPlate, soldOf, unpaidSessions, exitStatus, findLive, planRead, checkPlate, findValidation, planApplyValidation, sessionsForTenant, concurrency, tenantDays, PORTAL, lookup, quote, liveForPlate };
+    return { newMonthlyNumber, accountRoom, accountUsed, planAccountParkers, ROLES, ROLE_NAMES, METHODS, can, canonRole, ticketOf, ticketNo, snapRates, facFor, histAdd, endOfDate, ticketBill, extrasOf, freeKind, validPermitFor, vipForPlate, sessionsForCode, codeOccupancy, arAging, vehicleProfile, validationText, staleHours, TICKET, prorate, priceDetail, rateSummary, taxOf, specialQualifies, monthBounds, planMonthlyDue, sessionByToken, needsReview, cfg, plateDebt, isHot, hotList, planCollections, resAvailability, reservationFor, activeReservation, planNoShows, resActive, resPlates, M, H, D, normPlate, canon, uid, round2, money, sum, now, fac, ptype, tenant, camera, tzOf, dayStart, nextDayStart, charge, paidOf, sessionFee, balanceOf, isLive, onSiteSessions, occupancy, permitValid, permitCovers, permitsForPlate, memberForPlate, soldOf, unpaidSessions, exitStatus, findLive, planRead, checkPlate, findValidation, planApplyValidation, sessionsForTenant, concurrency, tenantDays, PORTAL, lookup, quote, liveForPlate };
   }
   Rules.normPlate = normPlate; Rules.ROLES = ROLES; Rules.ROLE_NAMES = ROLE_NAMES; Rules.can = can; Rules.canonRole = canonRole; Rules.METHODS = METHODS;
   if (typeof module !== 'undefined' && module.exports) module.exports = Rules; else root.ParkRules = Rules;

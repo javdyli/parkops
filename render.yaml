@@ -5,6 +5,7 @@
 #   SQUARE_ENVIRONMENT (sandbox|production), SQUARE_ACCESS_TOKEN, SQUARE_APPLICATION_ID, SQUARE_LOCATION_ID,
 #   SQUARE_TERMINAL_DEVICE_ID, RESEND_API_KEY or SENDGRID_API_KEY, EMAIL_FROM, TWILIO_ACCOUNT_SID,
 #   TWILIO_AUTH_TOKEN, TWILIO_FROM or TWILIO_MESSAGING_SERVICE_SID, TWILIO_DISPLAY_NUMBER, HEALTH_TOKEN,
+#   PLATE_RECOGNIZER_TOKEN (turns on live plate scanning from phones), SCAN_MONTHLY_CAP,
 #   PUBLIC_URL (only needed once you use your own domain; until then the Render address is used automatically).
 services:
   - type: web
@@ -28,6 +29,6 @@ services:
       - key: ADMIN_PASSWORD
         sync: false          # 10+ characters; add more staff in Settings > People & access afterwards
     disk:
-      name: parkops-data
+      name: parkops-data   # tickets, payments, backups and photos live here and survive every update
       mountPath: /var/data
-      sizeGB: 1
+      sizeGB: 10           # about $2.50/month. A year of a busy garage is roughly 0.2 GB of records; the extra room is for backups and photos. It can be made bigger later, never smaller.
