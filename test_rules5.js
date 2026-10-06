@@ -139,4 +139,19 @@ if (libPath) {
   assert.deepStrictEqual(snap(), plain);
   delete S.__byPlate; delete S.__byPlateArr; S.sessions = [];
 }
+// ---- receipts by email
+{
+  assert.ok(Rules.emailOk('driver@example.com') && Rules.emailOk('a.b+c@mail.example.org'));
+  ['', 'nope', 'a@b', 'two words@x.com', 'a@b.com\nBcc: x@y.com', '<a@b.com>', 'a@b.com, c@d.com'].forEach(e => assert.ok(!Rules.emailOk(e), 'rejects ' + JSON.stringify(e)));
+  T = ct(10, 15); S.sessions = [];
+  S.config.campusName = 'Sundance Square';
+  apply([{ type: 'set', coll: 'sessions', id: 'rc1', data: { plate: 'RCPT1', facilityId: 'g4', mode: 'lpr', kind: 'visitor', ticket: 'T1234567', startAt: ct(10, 12), endAt: ct(10, 13, 10), fee: 15, payments: [{ amount: 15, at: ct(10, 13, 9), method: 'cash', tendered: 20 }] } }]);
+  let m = R.receiptText(S.sessions[0], { receiptUrls: ['https://squareup.com/receipt/preview/X1'] });
+  assert.ok(/^Your Sundance Square parking receipt: \$15\.00 · RCPT1$/.test(m.subject), m.subject);
+  ['Garage 4', 'Ticket: T1234567', 'Plate: RCPT1', 'Total: $15.00', 'sales tax (8.25%)', 'Paid cash', 'tendered $20.00, change $5.00', 'Paid in full', 'Card receipt: https://squareup.com/receipt/preview/X1'].forEach(x => assert.ok(m.text.includes(x), 'receipt has ' + x + '\n' + m.text));
+  apply([{ type: 'set', coll: 'sessions', id: 'rc2', data: { plate: 'RCPT2', facilityId: 'l15', mode: 'prepaid', kind: 'visitor', ticket: 'T7654321', startAt: ct(10, 14), endAt: null, paidUntil: ct(10, 17), payments: [{ amount: 30, at: ct(10, 14), method: 'online' }] } }]);
+  m = R.receiptText(S.sessions.find(x => x.id === 'rc2'), { addTimeUrl: 'https://p.example/x/ABC' });
+  assert.ok(/Paid until: Oct 10, 5:00 PM/.test(m.text) && /Add time: https:\/\/p\.example\/x\/ABC/.test(m.text) && /Paid online/.test(m.text) && !/Balance due/.test(m.text), m.text);
+  S.sessions = []; delete S.config.campusName;
+}
 console.log('rules5 ok');

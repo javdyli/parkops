@@ -54,6 +54,19 @@
 
   /* ---------- dialogs ---------- */
   const dlgErrorOrOk = r => r && r.error ? r.error : true;
+  /* Email a ticket's receipt to the driver (hosted only: the server sends it). */
+  async function emailReceipt(id, email) {
+    try {
+      const r = await HOSTED.api('POST', '/api/tickets/' + encodeURIComponent(id) + '/emailReceipt', { email });
+      toast(r.sent ? `Receipt emailed to ${r.to}` : r.emailConfigured ? `Receipt for ${r.to} is queued` : 'Email isn’t set up yet, so the receipt was saved in Settings → Recent emails instead of sent.', !r.sent && !r.emailConfigured);
+      return r;
+    } catch (e) { toast(e.message, true); return { error: e.message }; }
+  }
+  window.emailReceiptDialog = function (id) {
+    const s = byId('sessions', id); if (!s) return;
+    openForm({ title: 'Email receipt · ' + s.plate, submit: 'Send receipt', fields: [{ id: 'email', label: 'Driver’s email', type: 'email', value: s.receiptEmail || '', required: true, help: 'The receipt shows the ticket, times, charges, tax and every payment.' }],
+      onSubmit: async v => { const em = String(v.email || '').trim(); if (!ParkRules.emailOk(em)) return 'Check the email address.'; const r = await emailReceipt(id, em); return r.error || true; } });
+  };
   window.payTicketDialog = function (id, opts) {
     const s = byId('sessions', id); if (!s) return; opts = opts || {};
     // Event nights: opts.entry collects the flat event rate at the entrance and leaves the ticket open.
@@ -65,12 +78,15 @@
       { id: 'amount', label: 'Amount ($) · leave as is for full payment', type: 'number', step: '0.01', value: due.toFixed(2), required: true, help: `${money(due)} due${b.tax.tax ? ` (includes ${money(b.tax.tax)} tax)` : ''}. A partial payment leaves the rest owed on the ticket${opts.close && !s.endAt && !can('tickets.adjust') ? ', and only a manager can close a ticket with money still owed, so collect the full amount' : ''}.` },
       { id: 'tendered', label: 'Cash tendered ($)', type: 'number', step: '0.01', value: '', help: 'Type what the driver hands you; change due appears below. Leave blank for exact change.' },
       { id: 'note', label: 'Note (reason, for complimentary)', value: '' },
+      ...(HOSTED ? [{ id: 'email', label: 'Email a receipt to (optional)', type: 'email', value: s.receiptEmail || '', help: 'The driver’s email. Leave blank for no email receipt.' }] : []),
     ], extra: `<button type="button" class="btn" id="payExact">Exactly ${money(due)}</button> <span id="changeDue" class="note"></span>`,
     onSubmit: async v => {
       if (v.method === 'comp' && !v.note.trim()) return 'Give a reason for complimentary parking.';
+      const em = String(v.email || '').trim(); if (em && !ParkRules.emailOk(em)) return 'Check the email address, or leave it blank.';
       const r = await ticketAction(id, 'pay', { method: v.method, amount: v.method === 'comp' ? due : +v.amount, tendered: v.method === 'cash' && v.tendered !== '' ? +v.tendered : null, note: v.note, close: !!opts.close, quoted: due });
       if (r.error) return r.error;
       UI.deskDone = { id, change: r.change, amount: r.amount }; toast(`${money(r.amount)} recorded${r.change > 0 ? ' · change ' + money(r.change) : ''}${r.closed ? ' · ticket closed' : ''}`);
+      if (em) await emailReceipt(id, em);
       if (opts.after) opts.after(r); return true;
     } });
     const upd = () => { const t = +($('#f_tendered', dlgForm) || {}).value, a = +($('#f_amount', dlgForm) || {}).value, el = $('#changeDue', dlgForm); if (el) el.textContent = t > 0 && a > 0 ? (t >= a ? 'Change due ' + money(t - a) : 'Short by ' + money(a - t)) : ''; };
@@ -164,7 +180,7 @@
       <div class="due ${due > 0 || entry > 0 ? '' : 'zero'}"><div><small class="muted" style="text-transform:uppercase;letter-spacing:.07em;font-weight:600">${entry > 0 && entry >= due ? 'Event rate due now' : due > 0 ? 'Amount due' : 'Nothing due'}</small><b>${money(entry > 0 && entry >= due ? entry : due)}</b>${b.tax.tax && (due > 0 || entry > 0) ? `<div class="note">Includes ${money(R.taxOf(entry > 0 && entry >= due ? entry : due).tax)} sales tax</div>` : ''}</div>
         <div class="facts" style="flex:1"><div><small>Arrived</small><b>${fmtTime(s.startAt, tz)}</b></div><div><small>Time parked</small><b>${dur(now() - s.startAt)}</b></div><div><small>Rate</small><b>${esc(R.rateSummary(R.facFor(s))[0] || '')}</b>${(() => { const rr = (R.facFor(s) || {}).rates || {}; return +rr.dailyMax > 0 ? `<span class="note">Daily max ${money(rr.dailyMax)}${rr.rolling ? ' per 24 h from arrival' : ' · day resets ' + esc(String(rr.resetTime || '00:00'))}</span>` : ''; })()}</div>${s.mode === 'prepaid' ? `<div><small>Prepaid until</small><b>${fmtTime(s.paidUntil, tz)}</b></div>` : ''}</div></div>
       ${billTable(b, s)}
-      ${done ? `<div class="receipt" role="status"><b>Paid ${money(done.amount)}${done.change > 0 ? ' · change due ' + money(done.change) : ''}</b><br>${s.endAt ? 'Ticket closed. ' : ''}<button class="btn sm" data-act="printReceipt" data-id="${esc(s.id)}">Print receipt</button> <button class="btn sm" data-act="deskClear">Next car <span class="kbd">F2</span></button></div>` : ''}
+      ${done ? `<div class="receipt" role="status"><b>Paid ${money(done.amount)}${done.change > 0 ? ' · change due ' + money(done.change) : ''}</b><br>${s.endAt ? 'Ticket closed. ' : ''}<button class="btn sm" data-act="printReceipt" data-id="${esc(s.id)}">Print receipt</button> ${HOSTED ? `<button class="btn sm" data-act="emailReceipt" data-id="${esc(s.id)}" data-perm="tickets">Email receipt</button> ` : ''}<button class="btn sm" data-act="deskClear">Next car <span class="kbd">F2</span></button></div>` : ''}
       ${entry > 0 ? `<div class="receipt" role="status"><b>${esc(ev.name || 'Event')} night: collect ${money(entry)} at the entrance.</b><br>The ticket stays open and the exit is already paid. A car still inside after the ${esc(String(((R.facFor(s) || {}).rates || {}).resetTime || '03:00'))} reset owes the new day when it leaves.</div>
       <div class="row" style="gap:8px"><button class="btn pri lg" data-act="deskPayEntry" data-id="${esc(s.id)}" data-perm="tickets">Collect ${money(entry)} event rate</button>${terminal ? `<button class="btn lg" data-act="deskTerminalEntry" data-id="${esc(s.id)}" data-perm="tickets">Square Terminal</button>` : ''}${S.validations.some(v => v.active && v.eventNights) ? `<button class="btn lg" data-act="validateSession" data-id="${esc(s.id)}" data-perm="tickets">Event-night code</button>` : ''}<button class="btn lg" data-act="openTicket" data-id="${esc(s.id)}">Details</button></div>` : !s.endAt ? `<div class="row" style="gap:8px">
         ${due > 0 ? `<button class="btn pri lg" data-act="deskPay" data-id="${esc(s.id)}" data-perm="tickets">Collect ${money(due)}</button>` : `<button class="btn pri lg" data-act="deskClose" data-id="${esc(s.id)}" data-perm="tickets">Close · nothing due</button>`}
@@ -173,7 +189,7 @@
         ${!s.validation && due > 0 ? `<button class="btn lg" data-act="validateSession" data-id="${esc(s.id)}" data-perm="tickets">Validation code</button>` : ''}
         ${due > 0 ? `<button class="btn lg" data-act="deskClose" data-id="${esc(s.id)}" data-perm="tickets.adjust">Let out unpaid${can('tickets.adjust') ? '' : ' · manager'}</button>` : ''}
         <button class="btn lg" data-act="openTicket" data-id="${esc(s.id)}">Details</button></div>
-        <p class="note" style="margin:0">${due > 0 && !can('tickets.adjust') ? 'Only a manager or owner can let a car out with money owed. ' : ''}Cash and external card payments are recorded here and go on the shift report. ${terminal ? 'Square Terminal sends the amount to the booth device for the driver to tap.' : hosted ? 'Add a Square Terminal device ID to this location to charge cards on a terminal.' : ''}</p>` : `<div class="row"><button class="btn" data-act="printReceipt" data-id="${esc(s.id)}">Print receipt</button><button class="btn" data-act="openTicket" data-id="${esc(s.id)}">Details</button><button class="btn" data-act="deskClear">Next car</button></div>`}
+        <p class="note" style="margin:0">${due > 0 && !can('tickets.adjust') ? 'Only a manager or owner can let a car out with money owed. ' : ''}Cash and external card payments are recorded here and go on the shift report. ${terminal ? 'Square Terminal sends the amount to the booth device for the driver to tap.' : hosted ? 'Add a Square Terminal device ID to this location to charge cards on a terminal.' : ''}</p>` : `<div class="row"><button class="btn" data-act="printReceipt" data-id="${esc(s.id)}">Print receipt</button>${HOSTED ? `<button class="btn" data-act="emailReceipt" data-id="${esc(s.id)}" data-perm="tickets">Email receipt</button>` : ''}<button class="btn" data-act="openTicket" data-id="${esc(s.id)}">Details</button><button class="btn" data-act="deskClear">Next car</button></div>`}
     </div></section>`;
   }
   function billTable(b, s) {
@@ -255,7 +271,7 @@
     if (s.startAt) items.push({ at: s.startAt, text: s.manual ? 'Ticket opened' + (s.valet ? ' (valet)' : ' by staff') : s.mode === 'prepaid' ? 'Paid by plate' + (s.prepaidAt ? '' : '') : 'Entered' + (s.entryCameraId ? ' · ' + ((byId('cameras', s.entryCameraId) || {}).name || 'camera') : ''), by: '' });
     if (s.prepaidAt && s.startLpr) items.push({ at: s.prepaidAt, text: 'Prepaid before arrival', by: '' });
     (s.payments || []).forEach(p => items.push({ at: p.at, text: `Payment ${money(p.amount)} · ${(ParkRules.METHODS[p.method] || p.method || '').toLowerCase()}${p.tendered != null ? ` (tendered ${money(p.tendered)})` : ''}${p.note ? ' · ' + p.note : ''}`, by: p.by || '' }));
-    (s.history || []).forEach(h => { if (h.action === 'payment' || h.action === 'created') return; items.push({ at: h.at, text: `${({ validation_applied: 'Validation applied', validation_replaced: 'Validation replaced', validation_removed: 'Validation removed', departed: 'Departed', reopened: 'Reopened', waived: 'Balance waived', waive_removed: 'Waiver removed', fee_adjusted: 'Fee adjusted', note: 'Note', plate_corrected: 'Plate corrected', valet: 'Valet', match_confirmed: 'Plate match confirmed', match_rejected: 'Plate match rejected', missed_exit_resolved: 'Missed exit resolved', sent_to_review: 'Sent to plate review', entry_added: 'Arrival added', dismissed: 'Dismissed', cited: 'Notice issued' })[h.action] || h.action}${h.detail ? ' · ' + h.detail : ''}`, by: h.by || '' }); });
+    (s.history || []).forEach(h => { if (h.action === 'payment' || h.action === 'created') return; items.push({ at: h.at, text: `${({ receipt_emailed: 'Receipt emailed', validation_applied: 'Validation applied', validation_replaced: 'Validation replaced', validation_removed: 'Validation removed', departed: 'Departed', reopened: 'Reopened', waived: 'Balance waived', waive_removed: 'Waiver removed', fee_adjusted: 'Fee adjusted', note: 'Note', plate_corrected: 'Plate corrected', valet: 'Valet', match_confirmed: 'Plate match confirmed', match_rejected: 'Plate match rejected', missed_exit_resolved: 'Missed exit resolved', sent_to_review: 'Sent to plate review', entry_added: 'Arrival added', dismissed: 'Dismissed', cited: 'Notice issued' })[h.action] || h.action}${h.detail ? ' · ' + h.detail : ''}`, by: h.by || '' }); });
     if (s.endAt && !s.closedManually) items.push({ at: s.endAt, text: s.noEntry ? 'Exit read with no matching entry' : s.missedExit ? 'Closed: exit never read (a new entry was seen)' : 'Exited' + (s.exitCameraId ? ' · ' + ((byId('cameras', s.exitCameraId) || {}).name || 'camera') : '') + (s.matchedBy ? ` · read as ${s.exitPlate} (${s.matchedBy === 'fuzzy' ? 'one character off' : s.matchedBy === 'lookalike' ? 'look-alike characters' : s.matchedBy})` : ''), by: '' });
     S.feed.filter(r => r.sessionId === s.id && r.level !== 'ok' && r.level !== 'info').forEach(r => items.push({ at: r.at, text: 'Camera: ' + r.text, by: '' }));
     // Server audit rows: ticket actions already appear above (they write history), so only show direct edits and payment-device events.
@@ -307,7 +323,7 @@
             ${!open ? act('adjustFee', 'Adjust fee', 'tickets.adjust') : ''}
             ${s.waived ? act('unwaive', 'Remove waiver', 'tickets.adjust') : (b.due > 0 || open) ? act('waiveSession', 'Waive', 'tickets.adjust') : ''}
             ${act('correctPlate', 'Correct plate', 'tickets.adjust')}${act('addNote', 'Add note', 'tickets')}
-            ${b.paid > 0 || !open ? act('printReceipt', 'Print receipt') : ''}
+            ${b.paid > 0 || !open ? act('printReceipt', 'Print receipt') : ''}${HOSTED && (b.paid > 0 || !open) ? act('emailReceipt', 'Email receipt', 'tickets') : ''}
             ${!open && b.due > 0 && !s.cited && !R.needsReview(s) && !(s.missedExit && !s.missedResolved) ? act('citeSession', 'Issue parking charge notice', 'citations', 'danger') : ''}
             ${open && !s.valet ? act('closeMissed', 'Send to plate review', 'tickets.adjust') : ''}
           </div>
@@ -544,6 +560,7 @@
     correctPlate(b) { const s = byId('sessions', b.dataset.id); reasonDialog(b.dataset.id, 'setPlate', `Correct plate ${s.plate}`, 'Save plate', 'Plate corrected', { fields: [{ id: 'plate', label: 'Correct plate', required: true }], args: v => ({ plate: v.plate }) }); },
     addNote(b) { openForm({ title: 'Add note', submit: 'Add note', fields: [{ id: 'text', label: 'Note', type: 'textarea', required: true }], onSubmit: async v => dlgErrorOrOk(await ticketAction(b.dataset.id, 'note', { text: v.text }, 'Note added')) }); },
     printReceipt(b) { window.printReceipt(b.dataset.id); },
+    emailReceipt(b) { window.emailReceiptDialog(b.dataset.id); },
     addEntry(b) { const s = byId('sessions', b.dataset.id); openForm({ title: `Arrival for ${s.plate}`, submit: 'Bill the stay', fields: [{ id: 'startAt', label: 'Arrived at', type: 'datetime-local', value: dtLocal(s.endAt - 2 * H), help: 'Use the entry camera photos or the driver’s word. The exit stays as read.' }], onSubmit: async v => dlgErrorOrOk(await ticketAction(s.id, 'review', { decision: 'createEntry', startAt: new Date(v.startAt).getTime() }, r => `Billed ${money(r.fee)}`)) }); },
     dismissReview(b) { reasonDialog(b.dataset.id, 'review', 'Dismiss this exit', 'Dismiss', 'Dismissed', { args: () => ({ decision: 'dismiss' }) }); },
     valetStatus(b) { ticketAction(b.dataset.id, 'valet', { status: b.dataset.v }, `Marked ${b.dataset.v}`); },

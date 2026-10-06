@@ -85,13 +85,14 @@
   /* One dialog for every payment. total is what the card is charged (tax included).
      onPay(payment, total) returns {error, amount, code}. When the server says the amount changed, the dialog shows
      the new amount and asks the driver to confirm. The idempotency key stays the same until a definite failure. */
-  function payDialog({ title, base, total, summary, submit, store: storeOnly, onPay }) {
+  function payDialog({ title, base, total, summary, submit, store: storeOnly, onPay, askEmail, email }) {
     const cfg = HX.payments || {}, saved = !storeOnly && HX.account && HX.account.card;
     if (total == null && base != null) total = R.taxOf(base).total;
     let key = newKey(), busy = false, payReq = null;
     dlgCfg = null;
     dlgForm.innerHTML = `<div class="dlg-h"><h2>${esc(title)}</h2><button type="button" class="btn sm" data-dlg="close">Close</button></div>
     <div class="dlg-b">${summary ? `<p style="margin:0 0 8px">${summary}</p>` : ''}${storeOnly ? '' : `<div class="quote" id="payAmt">${money(total)}</div><div class="note" id="payTax">${esc(base != null ? taxNote(base) : taxNote(total))}</div>`}
+      ${askEmail ? `<div class="field" style="margin:12px 0 4px"><label for="payEmail">Email me a receipt (optional)</label><input id="payEmail" type="email" autocomplete="email" inputmode="email" placeholder="you@example.com" value="${esc(email != null ? email : ((HX.account && HX.account.email) || lastEmail()))}"></div>` : ''}
       ${!storeOnly && cfg.enabled ? '<div class="wallets" id="walletBox"></div>' : ''}
       ${saved ? `<div class="paywith"><label><input type="radio" name="payWith" value="saved" checked> ${esc(saved.brand || 'Card')} ending ${esc(saved.last4)}</label><label><input type="radio" name="payWith" value="new"> Use another card</label></div>` : ''}
       <div id="sqWrap" ${saved ? 'hidden' : ''}>${cfg.enabled ? '<div id="sq-card"></div>' : '<div class="callout warn">Test mode: Square isn’t connected yet, so no card is charged.</div>'}</div>
@@ -105,9 +106,12 @@
     if (!saved) mount();
     async function submitWith(getPayment) {
       if (busy) return; busy = true; const btn = $('#payGo', dlgForm); btn.disabled = true; err('');
+      const emEl = $('#payEmail', dlgForm), em = emEl ? emEl.value.trim() : '';
+      if (em && !ParkRules.emailOk(em)) { err('Check the email address, or leave it blank.'); busy = false; btn.disabled = false; return; }
+      if (emEl) rememberEmail(em);
       try {
         const payment = Object.assign(await getPayment(), { idempotencyKey: key });
-        const r = await onPay(payment, total);
+        const r = await onPay(payment, total, { email: em });
         if (r && r.error) {
           if (r.amount != null && Math.abs(r.amount - total) > 0.005) { setTotal(r.amount); err(`The price is now ${money(r.amount)}. Tap pay again to confirm.`); }
           else { err(r.error); if (!/^network$/i.test(r.code || '')) key = newKey(); }
@@ -131,10 +135,11 @@
       } catch (e) { /* wallets unavailable; card form still works */ }
     })();
   }
-  function done(r, after) { UI.receipt = r.receipt ? Object.assign({}, r.receipt, { url: r.receiptUrl }) : UI.receipt; if (after) after(); render(); window.scrollTo(0, 0); }
+  function done(r, after) { UI.receipt = r.receipt ? Object.assign({}, r.receipt, { url: r.receiptUrl, emailedTo: r.emailedTo || null }) : UI.receipt; if (after) after(); render(); window.scrollTo(0, 0); }
   async function payPortal(op, args, base, title, summary, after, opts) {
-    payDialog({ title, base, summary, onPay: async (payment, total) => {
-      const r = await HX.portal(op, args, payment, opts && opts.noExpect ? undefined : total); if (r.error) return r;
+    payDialog({ title, base, summary, askEmail: true, email: args.email, onPay: async (payment, total, extra) => {
+      const a = extra && extra.email ? Object.assign({}, args, { email: extra.email }) : args;
+      const r = await HX.portal(op, a, payment, opts && opts.noExpect ? undefined : total); if (r.error) return r;
       await refreshLookup(); if (HX.account) refreshAccount(); done(r, after); return { ok: true };
     } });
   }
@@ -159,6 +164,8 @@
   const lastPlate = () => { try { return localStorage.getItem('parkops.plate') || ''; } catch (e) { return ''; } };
   const rememberPlate = p => { try { localStorage.setItem('parkops.plate', p); } catch (e) {} };
   const lastPhone = () => { try { return localStorage.getItem('parkops.phone') || ''; } catch (e) { return ''; } };
+  const lastEmail = () => { try { return localStorage.getItem('parkops.email') || ''; } catch (e) { return ''; } };
+  const rememberEmail = e => { try { if (e) localStorage.setItem('parkops.email', e); else localStorage.removeItem('parkops.email'); } catch (x) {} };
 
   function acctPlates() { return (HX.account && HX.account.plates) || []; }
   function plateField(id, label, value) {
@@ -421,7 +428,7 @@
     return `<div class="enf" style="max-width:980px">
     ${lotMode ? '' : `<section class="portal-hero"><h1>Parking at ${esc(campusName())}</h1><p>Pay by plate, get monthly parking, reserve a guaranteed spot, or settle a parking notice. Garages read your plate at entry and exit, so there’s no ticket.</p></section>`}
     <nav class="pnav" aria-label="Driver portal">${tabs.map(([k, l]) => `<button data-act="pv" data-v="${k}" aria-pressed="${UI.pv === k}">${l}</button>`).join('')}</nav>
-    ${UI.receipt ? `<div class="receipt" role="status"><b>${esc(UI.receipt.title)}</b><br>${esc(UI.receipt.body)}${UI.receipt.url ? ` <a href="${esc(UI.receipt.url)}" target="_blank" rel="noopener">View receipt</a>` : ''}${ratingWidget(UI.receipt)}</div>` : ''}
+    ${UI.receipt ? `<div class="receipt" role="status"><b>${esc(UI.receipt.title)}</b><br>${esc(UI.receipt.body)}${UI.receipt.url ? ` <a href="${esc(UI.receipt.url)}" target="_blank" rel="noopener">View receipt</a>` : ''}${UI.receipt.emailedTo ? `<br><span class="note">Receipt emailed to ${esc(UI.receipt.emailedTo)}.</span>` : ''}${ratingWidget(UI.receipt)}</div>` : ''}
     ${body()}
     ${HX.payments && !HX.payments.enabled ? '<p class="note" style="text-align:center">Test mode: payments are simulated until Square is connected.</p>' : ''}</div>`;
   };

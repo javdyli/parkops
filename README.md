@@ -205,6 +205,7 @@ Twilio handles STOP, START and HELP automatically.
 - **Reservations:** a guaranteed spot in the reserved section for a fee; parking is billed at the normal rate on exit; cancellations before the cutoff are refunded automatically.
 - **Valet:** park a car with key tag, space and vehicle; the board moves it through requested → retrieving → ready → handed over, with the runner's name and the payment at handoff. The valet fee is per location.
 - **Ratings:** every receipt offers 1–5 stars and a comment; one rating per visit. See **Reports → Ratings**.
+- **Email receipts:** every driver payment (pay by plate, a balance, a notice, monthly, a reservation) asks for an optional email for the receipt, remembered on that phone. At the booth, the Collect dialog has **Email a receipt to**, and **Email receipt** sits beside **Print receipt** after any payment (cash, card, Square Terminal, card on file, the event rate) and on every ticket. The email has the location, ticket, plate, times, charges, sales tax, each payment (with change given) and Square's card receipt link; a pay-by-plate receipt also has the add-time link. Each one is noted on the ticket's history. Until email is set up (`RESEND_API_KEY` or `SENDGRID_API_KEY`, plus `EMAIL_FROM`), receipts are kept in **Settings → Recent emails** instead of sent, and the screens say so.
 
 ## 10. Collecting on unpaid exits
 

@@ -7,6 +7,8 @@
   const M = 6e4, H = 36e5, D = 864e5;
   /* Plates are compared thousands of times a second on a busy night (every lookup walks the day's tickets), so the cleaned-up
      form of each plate string is remembered. */
+  /* An email address worth sending a receipt to: one @, a dot in the domain, nothing that could break a mail header. */
+  const emailOk = e => { e = String(e || '').trim(); return e.length >= 6 && e.length <= 120 && /^[^\s@<>",;:()[\]\\]+@[^\s@<>",;:()[\]\\]+\.[A-Za-z]{2,}$/.test(e); };
   const plateMemo = new Map();
   const normPlate = p => { if (typeof p !== 'string') return String(p || '').toUpperCase().replace(/[^A-Z0-9]/g, ''); let v = plateMemo.get(p); if (v === undefined) { v = p.toUpperCase().replace(/[^A-Z0-9]/g, ''); if (plateMemo.size > 50000) plateMemo.clear(); plateMemo.set(p, v); } return v; };
   const CONF = { O: '0', Q: '0', D: '0', I: '1', L: '1', B: '8', S: '5', Z: '2', G: '6' };
@@ -281,6 +283,33 @@
       const extras = extrasOf(s), late = +s.lateFee || 0, paid = paidOf(s);
       const total = round2(parking + extras + late), due = balanceOf(s);
       return { facility: f, detail: pd, parking: round2(parking), adjusted, extras, late, paid, total, due, tax: taxOf(total), start: s.startAt, end: at, minutes: s.startAt ? Math.round(((end || s.endAt || now()) - s.startAt) / M) : 0, prepaidOpen };
+    }
+    /* A ticket's receipt as plain text for email: the same lines as the printed receipt. o = { org, receiptUrls, addTimeUrl }. */
+    function receiptText(s, o) {
+      o = o || {}; const b = ticketBill(s), f = b.facility, tz = tzOf(f), c = cfg(), org = o.org || c.campusName || 'Parking';
+      const t = x => x ? new Date(x).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', timeZone: tz }) : '—';
+      const dur = m => m < 60 ? m + ' min' : Math.floor(m / 60) + ' h' + (m % 60 ? ' ' + (m % 60) + ' min' : '');
+      const L = [org + ' parking receipt', f ? f.name + (f.address ? ', ' + f.address : '') : '', '', 'Ticket: ' + ticketOf(s), 'Plate: ' + s.plate, 'In: ' + t(s.startAt)];
+      if (b.prepaidOpen) L.push('Paid until: ' + t(b.end));
+      else { L.push(s.endAt ? 'Out: ' + t(s.endAt) : 'Still parked as of ' + t(b.end)); L.push('Time: ' + dur(b.minutes)); }
+      L.push('');
+      if (!b.prepaidOpen) {
+        b.detail.days.forEach(d => L.push(`Parking ${new Date(d.start).toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: tz })} (${dur(d.minutes)})${d.capped ? ', daily max' : ''}: ${money(d.amount)}`));
+        if (b.detail.special) L.push(`${b.detail.special.name} rate: ${money(b.detail.special.price)}`);
+        if (b.detail.freeMinutes && s.validation) L.push(`Validation ${s.validation.code}: ${dur(b.detail.freeMinutes)} free`);
+        if (b.detail.discount && !b.detail.freeMinutes) L.push(`Validation ${s.validation ? s.validation.code : ''}: -${money(b.detail.discount)}`);
+        if (b.adjusted) L.push('Fee adjusted: ' + money(b.parking));
+      }
+      if (b.extras) L.push('Valet: ' + money(b.extras));
+      if (b.late) L.push('Late fee: ' + money(b.late));
+      L.push('Total: ' + money(b.total));
+      if (b.tax.tax) L.push((c.taxIncluded === false ? 'Includes ' : 'Price includes ') + money(b.tax.tax) + ' sales tax (' + b.tax.rate + '%)');
+      (s.payments || []).forEach(p => L.push(`Paid ${String(METHODS[p.method] || p.method || '').toLowerCase()} ${t(p.at)}: ${money(p.amount)}${p.tendered != null && p.tendered > p.amount ? ` (tendered ${money(p.tendered)}, change ${money(p.tendered - p.amount)})` : ''}`));
+      L.push(b.due > 0 ? 'Balance due: ' + money(b.due) : b.paid > 0 ? 'Paid in full' : '');
+      (o.receiptUrls || []).filter(Boolean).forEach(u => L.push('Card receipt: ' + u));
+      if (o.addTimeUrl) L.push('', 'Add time: ' + o.addTimeUrl);
+      L.push('', 'Thank you for parking with ' + org + '.');
+      return { subject: `Your ${org} parking receipt: ${b.paid > 0 ? money(b.paid) + ' · ' : ''}${s.plate}`, text: L.filter((x, i, a) => !(x === '' && a[i - 1] === '')).join('\n').trim() };
     }
     const isLive = s => !s.endAt && (s.mode === 'lpr' || (s.paidUntil || 0) > now() - 12 * H);
     const onSiteSessions = f => L('sessions').filter(s => s.facilityId === f.id && !s.endAt && (s.mode === 'lpr' || (s.paidUntil || 0) > now()));
@@ -1031,8 +1060,8 @@
       };
     }
 
-    return { newMonthlyNumber, accountRoom, accountUsed, planAccountParkers, ROLES, ROLE_NAMES, METHODS, can, canonRole, ticketOf, ticketNo, snapRates, facFor, histAdd, endOfDate, ticketBill, extrasOf, freeKind, validPermitFor, vipForPlate, sessionsForCode, codeOccupancy, arAging, vehicleProfile, validationText, staleHours, TICKET, prorate, priceDetail, rateSummary, taxOf, specialQualifies, monthBounds, planMonthlyDue, sessionByToken, needsReview, cfg, plateDebt, isHot, hotList, planCollections, resAvailability, reservationFor, activeReservation, planNoShows, resActive, resPlates, M, H, D, normPlate, canon, uid, round2, money, sum, now, fac, ptype, tenant, camera, tzOf, dayStart, nextDayStart, charge, paidOf, sessionFee, balanceOf, isLive, onSiteSessions, occupancy, spaceUse, homeOf, repeatValidations, isEvent, eventAt, entryDue, permitValid, permitCovers, permitsForPlate, memberForPlate, soldOf, unpaidSessions, exitStatus, findLive, planRead, checkPlate, checkKind, findValidation, planApplyValidation, sessionsForTenant, concurrency, tenantDays, PORTAL, lookup, quote, liveForPlate };
+    return { newMonthlyNumber, accountRoom, accountUsed, planAccountParkers, ROLES, ROLE_NAMES, METHODS, can, canonRole, ticketOf, ticketNo, snapRates, facFor, histAdd, endOfDate, ticketBill, receiptText, extrasOf, freeKind, validPermitFor, vipForPlate, sessionsForCode, codeOccupancy, arAging, vehicleProfile, validationText, staleHours, TICKET, prorate, priceDetail, rateSummary, taxOf, specialQualifies, monthBounds, planMonthlyDue, sessionByToken, needsReview, cfg, plateDebt, isHot, hotList, planCollections, resAvailability, reservationFor, activeReservation, planNoShows, resActive, resPlates, M, H, D, normPlate, canon, uid, round2, money, sum, now, fac, ptype, tenant, camera, tzOf, dayStart, nextDayStart, charge, paidOf, sessionFee, balanceOf, isLive, onSiteSessions, occupancy, spaceUse, homeOf, repeatValidations, isEvent, eventAt, entryDue, permitValid, permitCovers, permitsForPlate, memberForPlate, soldOf, unpaidSessions, exitStatus, findLive, planRead, checkPlate, checkKind, findValidation, planApplyValidation, sessionsForTenant, concurrency, tenantDays, PORTAL, lookup, quote, liveForPlate };
   }
-  Rules.normPlate = normPlate; Rules.ROLES = ROLES; Rules.ROLE_NAMES = ROLE_NAMES; Rules.can = can; Rules.canonRole = canonRole; Rules.METHODS = METHODS;
+  Rules.emailOk = emailOk; Rules.normPlate = normPlate; Rules.ROLES = ROLES; Rules.ROLE_NAMES = ROLE_NAMES; Rules.can = can; Rules.canonRole = canonRole; Rules.METHODS = METHODS;
   if (typeof module !== 'undefined' && module.exports) module.exports = Rules; else root.ParkRules = Rules;
 })(typeof window !== 'undefined' ? window : globalThis);

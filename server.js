@@ -32,7 +32,7 @@ const COLLS = ['facilities', 'permitTypes', 'permits', 'sessions', 'citations', 
    staff never write it directly (the system does, through the ticket and portal endpoints). */
 const DB_PERM = { facilities: 'facilities', cameras: 'cameras', settings: 'settings', validations: 'validations', tenants: 'validations', vips: 'vips', permitTypes: 'monthly', permits: 'monthly', companies: 'monthly', invoices: 'monthly', members: 'monthly', reservations: 'reservations', citations: 'citations', sessions: 'tickets.adjust', ratings: null };
 /* Ticket actions and the permission each needs. Replacing a validation, complimentary tickets and anything that changes money after the fact need tickets.adjust (manager and up). */
-const TK_PERM = { create: 'tickets', pay: 'tickets', close: 'tickets', note: 'tickets', validate: 'tickets', valet: 'tickets', terminal: 'tickets', chargeCard: 'tickets', markCited: 'citations', reopen: 'tickets.adjust', waive: 'tickets.adjust', unwaive: 'tickets.adjust', adjust: 'tickets.adjust', setPlate: 'tickets.adjust', removeValidation: 'tickets.adjust', review: 'tickets.adjust' };
+const TK_PERM = { emailReceipt: 'tickets', create: 'tickets', pay: 'tickets', close: 'tickets', note: 'tickets', validate: 'tickets', valet: 'tickets', terminal: 'tickets', chargeCard: 'tickets', markCited: 'citations', reopen: 'tickets.adjust', waive: 'tickets.adjust', unwaive: 'tickets.adjust', adjust: 'tickets.adjust', setPlate: 'tickets.adjust', removeValidation: 'tickets.adjust', review: 'tickets.adjust' };
 const STAFF_METHODS = ['cash', 'card', 'check', 'comp'];
 const ROLE_LIST = ['owner', 'manager', 'attendant', 'accountant', 'viewer'];
 const PUBLIC_OPS = ['prepay', 'reserve', 'cancelReservation', 'payBalance', 'payCitation', 'appeal', 'validate', 'payPermit', 'rate'];
@@ -930,9 +930,11 @@ async function runPortal(op, args, payment, acct, expectedAmount) {
     catch (e) { console.error('commit after payment failed', e); alertOnce('commit:' + (pay && pay.id), 1, 'Payment taken but record not saved', `${op} ${pay && pay.id}: ${e.message}`); }
     const to = args.email || (acct && acct.email);
     const extra = pay && pay.tax ? `\n\nTotal ${money(pay.total)} includes ${money(pay.tax)} sales tax.` : '';
-    if (to && r.receipt) mailer.send({ to, subject: r.receipt.title, text: `${r.receipt.body}${extra}${pay && pay.receiptUrl ? '\n\nReceipt: ' + pay.receiptUrl : ''}${op === 'reserve' ? `\n\nManage or cancel: ${BASE}/?reservation=${r.code}` : ''}\n\n${orgName()}` });
+    const sid = r.sessionId || (r.receipt && r.receipt.sessionId) || (op === 'payBalance' ? args.sessionId : null), sess = sid && (op === 'prepay' || op === 'payBalance') ? S.sessions.find(x => x.id === sid) : null;
+    if (to && sess) { const m = R.receiptText(sess, { org: orgName(), receiptUrls: pay && pay.receiptUrl ? [pay.receiptUrl] : [], addTimeUrl: op === 'prepay' && sess.extendToken && !sess.endAt ? `${BASE}/x/${sess.extendToken}` : null }); mailer.send({ to, subject: m.subject, text: m.text }); }
+    else if (to && r.receipt) mailer.send({ to, subject: r.receipt.title, text: `${r.receipt.body}${extra}${pay && pay.receiptUrl ? '\n\nReceipt: ' + pay.receiptUrl : ''}${op === 'reserve' ? `\n\nManage or cancel: ${BASE}/?reservation=${r.code}` : ''}\n\n${orgName()}` });
     if (op === 'prepay' && args.smsOptIn && args.phone) { const s = S.sessions.find(x => x.id === r.sessionId); if (s && s.extendToken) sms.send(args.phone, `${orgName()}: ${r.receipt.title}. ${r.receipt.body.split('.')[0]}. Add time: ${BASE}/x/${s.extendToken}`); }
-    return { receipt: r.receipt, receiptUrl: pay && pay.receiptUrl, total: pay && pay.total, tax: pay && pay.tax, code: r.code, sessionId: r.sessionId || (r.receipt && r.receipt.sessionId) || null };
+    return { receipt: r.receipt, receiptUrl: pay && pay.receiptUrl, emailedTo: to && (sess || r.receipt) && mailer.configured ? to : null, total: pay && pay.total, tax: pay && pay.tax, code: r.code, sessionId: r.sessionId || (r.receipt && r.receipt.sessionId) || null };
   });
 }
 
@@ -1161,6 +1163,16 @@ async function route(req, res) {
       const s = S.sessions.find(x => x.id === sid); if (!s) return fail(res, 404, 'Ticket not found', 'not_found');
       const mgr = can(staff, 'tickets.adjust'); // set here, never taken from the request, so a client can't claim manager rights
       const args = Object.assign({}, b, { by: staff.name, allowBackdate: mgr, allowUnpaid: mgr, requireFull: !mgr });
+      if (action === 'emailReceipt') { // a booth attendant emails the driver a receipt for this ticket
+        const to = String(b.email || '').trim().toLowerCase();
+        if (!Rules.emailOk(to)) return fail(res, 400, 'Check the email address.');
+        if (limited(req, 'receiptMail', 30)) return fail(res, 429, 'Too many receipts a minute. Wait a moment.', 'rate_limited');
+        const urls = store.all('SELECT receipt_url FROM payments WHERE session_id=? AND receipt_url IS NOT NULL ORDER BY created_at', s.id).map(x => x.receipt_url);
+        const m = R.receiptText(s, { org: orgName(), receiptUrls: urls });
+        const sent = await mailer.send({ to, subject: m.subject, text: m.text });
+        await commit([{ type: 'update', coll: 'sessions', id: s.id, data: { receiptEmail: to, history: R.histAdd(s, { action: 'receipt_emailed', by: staff.name, detail: to }) } }], actorOf(staff));
+        return send(res, 200, { sent: !!sent, emailConfigured: !!mailer.configured, to });
+      }
       if (action === 'terminal') return startTerminal(res, s, args, staff);
       if (action === 'chargeCard') return chargeCardOnFile(res, s, args, staff);
       if (action === 'pay') { if (!STAFF_METHODS.includes(args.method)) return fail(res, 400, 'Choose cash, card, check or complimentary. Card-on-file and Terminal payments have their own buttons.'); delete args.pid; }
@@ -1694,6 +1706,8 @@ async function route(req, res) {
     const card = !!(b.payment && (b.payment.sourceId || b.payment.savedCard));
     if (card && cardBlocked(req)) return fail(res, 429, 'Too many cards were declined from this network. Try again in 15 minutes, use your phone’s data instead of Wi-Fi, or pay at the booth.', 'rate_limited');
     delete args.accountId; delete args.companyId; delete args.companyName; delete args.source;
+    // An email for the receipt (optional): checked here so nothing odd reaches a mail header.
+    if (args.email != null && String(args.email).trim() !== '') { const em = String(args.email).trim().toLowerCase(); if (!Rules.emailOk(em)) return send(res, 200, { error: 'Check the email address.' }); args.email = em; } else delete args.email;
     if (acct) { args.accountId = acct.id; if (['reserve', 'monthlySignup'].includes(op)) { args.name = args.name || acct.name; args.email = acct.email; } }
     if (op === 'monthlySignup' && !acct.sq_card) return send(res, 200, { error: 'Add a card to your account first. Monthly parking is billed to it on the 1st.' });
     if (op === 'monthlySignup') b.payment = { savedCard: true, idempotencyKey: b.payment && b.payment.idempotencyKey };

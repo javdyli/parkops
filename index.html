@@ -320,6 +320,8 @@ button,[data-act],select,summary,label{touch-action:manipulation}
   const M = 6e4, H = 36e5, D = 864e5;
   /* Plates are compared thousands of times a second on a busy night (every lookup walks the day's tickets), so the cleaned-up
      form of each plate string is remembered. */
+  /* An email address worth sending a receipt to: one @, a dot in the domain, nothing that could break a mail header. */
+  const emailOk = e => { e = String(e || '').trim(); return e.length >= 6 && e.length <= 120 && /^[^\s@<>",;:()[\]\\]+@[^\s@<>",;:()[\]\\]+\.[A-Za-z]{2,}$/.test(e); };
   const plateMemo = new Map();
   const normPlate = p => { if (typeof p !== 'string') return String(p || '').toUpperCase().replace(/[^A-Z0-9]/g, ''); let v = plateMemo.get(p); if (v === undefined) { v = p.toUpperCase().replace(/[^A-Z0-9]/g, ''); if (plateMemo.size > 50000) plateMemo.clear(); plateMemo.set(p, v); } return v; };
   const CONF = { O: '0', Q: '0', D: '0', I: '1', L: '1', B: '8', S: '5', Z: '2', G: '6' };
@@ -594,6 +596,33 @@ button,[data-act],select,summary,label{touch-action:manipulation}
       const extras = extrasOf(s), late = +s.lateFee || 0, paid = paidOf(s);
       const total = round2(parking + extras + late), due = balanceOf(s);
       return { facility: f, detail: pd, parking: round2(parking), adjusted, extras, late, paid, total, due, tax: taxOf(total), start: s.startAt, end: at, minutes: s.startAt ? Math.round(((end || s.endAt || now()) - s.startAt) / M) : 0, prepaidOpen };
+    }
+    /* A ticket's receipt as plain text for email: the same lines as the printed receipt. o = { org, receiptUrls, addTimeUrl }. */
+    function receiptText(s, o) {
+      o = o || {}; const b = ticketBill(s), f = b.facility, tz = tzOf(f), c = cfg(), org = o.org || c.campusName || 'Parking';
+      const t = x => x ? new Date(x).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', timeZone: tz }) : '—';
+      const dur = m => m < 60 ? m + ' min' : Math.floor(m / 60) + ' h' + (m % 60 ? ' ' + (m % 60) + ' min' : '');
+      const L = [org + ' parking receipt', f ? f.name + (f.address ? ', ' + f.address : '') : '', '', 'Ticket: ' + ticketOf(s), 'Plate: ' + s.plate, 'In: ' + t(s.startAt)];
+      if (b.prepaidOpen) L.push('Paid until: ' + t(b.end));
+      else { L.push(s.endAt ? 'Out: ' + t(s.endAt) : 'Still parked as of ' + t(b.end)); L.push('Time: ' + dur(b.minutes)); }
+      L.push('');
+      if (!b.prepaidOpen) {
+        b.detail.days.forEach(d => L.push(`Parking ${new Date(d.start).toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: tz })} (${dur(d.minutes)})${d.capped ? ', daily max' : ''}: ${money(d.amount)}`));
+        if (b.detail.special) L.push(`${b.detail.special.name} rate: ${money(b.detail.special.price)}`);
+        if (b.detail.freeMinutes && s.validation) L.push(`Validation ${s.validation.code}: ${dur(b.detail.freeMinutes)} free`);
+        if (b.detail.discount && !b.detail.freeMinutes) L.push(`Validation ${s.validation ? s.validation.code : ''}: -${money(b.detail.discount)}`);
+        if (b.adjusted) L.push('Fee adjusted: ' + money(b.parking));
+      }
+      if (b.extras) L.push('Valet: ' + money(b.extras));
+      if (b.late) L.push('Late fee: ' + money(b.late));
+      L.push('Total: ' + money(b.total));
+      if (b.tax.tax) L.push((c.taxIncluded === false ? 'Includes ' : 'Price includes ') + money(b.tax.tax) + ' sales tax (' + b.tax.rate + '%)');
+      (s.payments || []).forEach(p => L.push(`Paid ${String(METHODS[p.method] || p.method || '').toLowerCase()} ${t(p.at)}: ${money(p.amount)}${p.tendered != null && p.tendered > p.amount ? ` (tendered ${money(p.tendered)}, change ${money(p.tendered - p.amount)})` : ''}`));
+      L.push(b.due > 0 ? 'Balance due: ' + money(b.due) : b.paid > 0 ? 'Paid in full' : '');
+      (o.receiptUrls || []).filter(Boolean).forEach(u => L.push('Card receipt: ' + u));
+      if (o.addTimeUrl) L.push('', 'Add time: ' + o.addTimeUrl);
+      L.push('', 'Thank you for parking with ' + org + '.');
+      return { subject: `Your ${org} parking receipt: ${b.paid > 0 ? money(b.paid) + ' · ' : ''}${s.plate}`, text: L.filter((x, i, a) => !(x === '' && a[i - 1] === '')).join('\n').trim() };
     }
     const isLive = s => !s.endAt && (s.mode === 'lpr' || (s.paidUntil || 0) > now() - 12 * H);
     const onSiteSessions = f => L('sessions').filter(s => s.facilityId === f.id && !s.endAt && (s.mode === 'lpr' || (s.paidUntil || 0) > now()));
@@ -1344,9 +1373,9 @@ button,[data-act],select,summary,label{touch-action:manipulation}
       };
     }
 
-    return { newMonthlyNumber, accountRoom, accountUsed, planAccountParkers, ROLES, ROLE_NAMES, METHODS, can, canonRole, ticketOf, ticketNo, snapRates, facFor, histAdd, endOfDate, ticketBill, extrasOf, freeKind, validPermitFor, vipForPlate, sessionsForCode, codeOccupancy, arAging, vehicleProfile, validationText, staleHours, TICKET, prorate, priceDetail, rateSummary, taxOf, specialQualifies, monthBounds, planMonthlyDue, sessionByToken, needsReview, cfg, plateDebt, isHot, hotList, planCollections, resAvailability, reservationFor, activeReservation, planNoShows, resActive, resPlates, M, H, D, normPlate, canon, uid, round2, money, sum, now, fac, ptype, tenant, camera, tzOf, dayStart, nextDayStart, charge, paidOf, sessionFee, balanceOf, isLive, onSiteSessions, occupancy, spaceUse, homeOf, repeatValidations, isEvent, eventAt, entryDue, permitValid, permitCovers, permitsForPlate, memberForPlate, soldOf, unpaidSessions, exitStatus, findLive, planRead, checkPlate, checkKind, findValidation, planApplyValidation, sessionsForTenant, concurrency, tenantDays, PORTAL, lookup, quote, liveForPlate };
+    return { newMonthlyNumber, accountRoom, accountUsed, planAccountParkers, ROLES, ROLE_NAMES, METHODS, can, canonRole, ticketOf, ticketNo, snapRates, facFor, histAdd, endOfDate, ticketBill, receiptText, extrasOf, freeKind, validPermitFor, vipForPlate, sessionsForCode, codeOccupancy, arAging, vehicleProfile, validationText, staleHours, TICKET, prorate, priceDetail, rateSummary, taxOf, specialQualifies, monthBounds, planMonthlyDue, sessionByToken, needsReview, cfg, plateDebt, isHot, hotList, planCollections, resAvailability, reservationFor, activeReservation, planNoShows, resActive, resPlates, M, H, D, normPlate, canon, uid, round2, money, sum, now, fac, ptype, tenant, camera, tzOf, dayStart, nextDayStart, charge, paidOf, sessionFee, balanceOf, isLive, onSiteSessions, occupancy, spaceUse, homeOf, repeatValidations, isEvent, eventAt, entryDue, permitValid, permitCovers, permitsForPlate, memberForPlate, soldOf, unpaidSessions, exitStatus, findLive, planRead, checkPlate, checkKind, findValidation, planApplyValidation, sessionsForTenant, concurrency, tenantDays, PORTAL, lookup, quote, liveForPlate };
   }
-  Rules.normPlate = normPlate; Rules.ROLES = ROLES; Rules.ROLE_NAMES = ROLE_NAMES; Rules.can = can; Rules.canonRole = canonRole; Rules.METHODS = METHODS;
+  Rules.emailOk = emailOk; Rules.normPlate = normPlate; Rules.ROLES = ROLES; Rules.ROLE_NAMES = ROLE_NAMES; Rules.can = can; Rules.canonRole = canonRole; Rules.METHODS = METHODS;
   if (typeof module !== 'undefined' && module.exports) module.exports = Rules; else root.ParkRules = Rules;
 })(typeof window !== 'undefined' ? window : globalThis);
 
@@ -2804,6 +2833,19 @@ render();boot();
 
   /* ---------- dialogs ---------- */
   const dlgErrorOrOk = r => r && r.error ? r.error : true;
+  /* Email a ticket's receipt to the driver (hosted only: the server sends it). */
+  async function emailReceipt(id, email) {
+    try {
+      const r = await HOSTED.api('POST', '/api/tickets/' + encodeURIComponent(id) + '/emailReceipt', { email });
+      toast(r.sent ? `Receipt emailed to ${r.to}` : r.emailConfigured ? `Receipt for ${r.to} is queued` : 'Email isn’t set up yet, so the receipt was saved in Settings → Recent emails instead of sent.', !r.sent && !r.emailConfigured);
+      return r;
+    } catch (e) { toast(e.message, true); return { error: e.message }; }
+  }
+  window.emailReceiptDialog = function (id) {
+    const s = byId('sessions', id); if (!s) return;
+    openForm({ title: 'Email receipt · ' + s.plate, submit: 'Send receipt', fields: [{ id: 'email', label: 'Driver’s email', type: 'email', value: s.receiptEmail || '', required: true, help: 'The receipt shows the ticket, times, charges, tax and every payment.' }],
+      onSubmit: async v => { const em = String(v.email || '').trim(); if (!ParkRules.emailOk(em)) return 'Check the email address.'; const r = await emailReceipt(id, em); return r.error || true; } });
+  };
   window.payTicketDialog = function (id, opts) {
     const s = byId('sessions', id); if (!s) return; opts = opts || {};
     // Event nights: opts.entry collects the flat event rate at the entrance and leaves the ticket open.
@@ -2815,12 +2857,15 @@ render();boot();
       { id: 'amount', label: 'Amount ($) · leave as is for full payment', type: 'number', step: '0.01', value: due.toFixed(2), required: true, help: `${money(due)} due${b.tax.tax ? ` (includes ${money(b.tax.tax)} tax)` : ''}. A partial payment leaves the rest owed on the ticket${opts.close && !s.endAt && !can('tickets.adjust') ? ', and only a manager can close a ticket with money still owed, so collect the full amount' : ''}.` },
       { id: 'tendered', label: 'Cash tendered ($)', type: 'number', step: '0.01', value: '', help: 'Type what the driver hands you; change due appears below. Leave blank for exact change.' },
       { id: 'note', label: 'Note (reason, for complimentary)', value: '' },
+      ...(HOSTED ? [{ id: 'email', label: 'Email a receipt to (optional)', type: 'email', value: s.receiptEmail || '', help: 'The driver’s email. Leave blank for no email receipt.' }] : []),
     ], extra: `<button type="button" class="btn" id="payExact">Exactly ${money(due)}</button> <span id="changeDue" class="note"></span>`,
     onSubmit: async v => {
       if (v.method === 'comp' && !v.note.trim()) return 'Give a reason for complimentary parking.';
+      const em = String(v.email || '').trim(); if (em && !ParkRules.emailOk(em)) return 'Check the email address, or leave it blank.';
       const r = await ticketAction(id, 'pay', { method: v.method, amount: v.method === 'comp' ? due : +v.amount, tendered: v.method === 'cash' && v.tendered !== '' ? +v.tendered : null, note: v.note, close: !!opts.close, quoted: due });
       if (r.error) return r.error;
       UI.deskDone = { id, change: r.change, amount: r.amount }; toast(`${money(r.amount)} recorded${r.change > 0 ? ' · change ' + money(r.change) : ''}${r.closed ? ' · ticket closed' : ''}`);
+      if (em) await emailReceipt(id, em);
       if (opts.after) opts.after(r); return true;
     } });
     const upd = () => { const t = +($('#f_tendered', dlgForm) || {}).value, a = +($('#f_amount', dlgForm) || {}).value, el = $('#changeDue', dlgForm); if (el) el.textContent = t > 0 && a > 0 ? (t >= a ? 'Change due ' + money(t - a) : 'Short by ' + money(a - t)) : ''; };
@@ -2914,7 +2959,7 @@ render();boot();
       <div class="due ${due > 0 || entry > 0 ? '' : 'zero'}"><div><small class="muted" style="text-transform:uppercase;letter-spacing:.07em;font-weight:600">${entry > 0 && entry >= due ? 'Event rate due now' : due > 0 ? 'Amount due' : 'Nothing due'}</small><b>${money(entry > 0 && entry >= due ? entry : due)}</b>${b.tax.tax && (due > 0 || entry > 0) ? `<div class="note">Includes ${money(R.taxOf(entry > 0 && entry >= due ? entry : due).tax)} sales tax</div>` : ''}</div>
         <div class="facts" style="flex:1"><div><small>Arrived</small><b>${fmtTime(s.startAt, tz)}</b></div><div><small>Time parked</small><b>${dur(now() - s.startAt)}</b></div><div><small>Rate</small><b>${esc(R.rateSummary(R.facFor(s))[0] || '')}</b>${(() => { const rr = (R.facFor(s) || {}).rates || {}; return +rr.dailyMax > 0 ? `<span class="note">Daily max ${money(rr.dailyMax)}${rr.rolling ? ' per 24 h from arrival' : ' · day resets ' + esc(String(rr.resetTime || '00:00'))}</span>` : ''; })()}</div>${s.mode === 'prepaid' ? `<div><small>Prepaid until</small><b>${fmtTime(s.paidUntil, tz)}</b></div>` : ''}</div></div>
       ${billTable(b, s)}
-      ${done ? `<div class="receipt" role="status"><b>Paid ${money(done.amount)}${done.change > 0 ? ' · change due ' + money(done.change) : ''}</b><br>${s.endAt ? 'Ticket closed. ' : ''}<button class="btn sm" data-act="printReceipt" data-id="${esc(s.id)}">Print receipt</button> <button class="btn sm" data-act="deskClear">Next car <span class="kbd">F2</span></button></div>` : ''}
+      ${done ? `<div class="receipt" role="status"><b>Paid ${money(done.amount)}${done.change > 0 ? ' · change due ' + money(done.change) : ''}</b><br>${s.endAt ? 'Ticket closed. ' : ''}<button class="btn sm" data-act="printReceipt" data-id="${esc(s.id)}">Print receipt</button> ${HOSTED ? `<button class="btn sm" data-act="emailReceipt" data-id="${esc(s.id)}" data-perm="tickets">Email receipt</button> ` : ''}<button class="btn sm" data-act="deskClear">Next car <span class="kbd">F2</span></button></div>` : ''}
       ${entry > 0 ? `<div class="receipt" role="status"><b>${esc(ev.name || 'Event')} night: collect ${money(entry)} at the entrance.</b><br>The ticket stays open and the exit is already paid. A car still inside after the ${esc(String(((R.facFor(s) || {}).rates || {}).resetTime || '03:00'))} reset owes the new day when it leaves.</div>
       <div class="row" style="gap:8px"><button class="btn pri lg" data-act="deskPayEntry" data-id="${esc(s.id)}" data-perm="tickets">Collect ${money(entry)} event rate</button>${terminal ? `<button class="btn lg" data-act="deskTerminalEntry" data-id="${esc(s.id)}" data-perm="tickets">Square Terminal</button>` : ''}${S.validations.some(v => v.active && v.eventNights) ? `<button class="btn lg" data-act="validateSession" data-id="${esc(s.id)}" data-perm="tickets">Event-night code</button>` : ''}<button class="btn lg" data-act="openTicket" data-id="${esc(s.id)}">Details</button></div>` : !s.endAt ? `<div class="row" style="gap:8px">
         ${due > 0 ? `<button class="btn pri lg" data-act="deskPay" data-id="${esc(s.id)}" data-perm="tickets">Collect ${money(due)}</button>` : `<button class="btn pri lg" data-act="deskClose" data-id="${esc(s.id)}" data-perm="tickets">Close · nothing due</button>`}
@@ -2923,7 +2968,7 @@ render();boot();
         ${!s.validation && due > 0 ? `<button class="btn lg" data-act="validateSession" data-id="${esc(s.id)}" data-perm="tickets">Validation code</button>` : ''}
         ${due > 0 ? `<button class="btn lg" data-act="deskClose" data-id="${esc(s.id)}" data-perm="tickets.adjust">Let out unpaid${can('tickets.adjust') ? '' : ' · manager'}</button>` : ''}
         <button class="btn lg" data-act="openTicket" data-id="${esc(s.id)}">Details</button></div>
-        <p class="note" style="margin:0">${due > 0 && !can('tickets.adjust') ? 'Only a manager or owner can let a car out with money owed. ' : ''}Cash and external card payments are recorded here and go on the shift report. ${terminal ? 'Square Terminal sends the amount to the booth device for the driver to tap.' : hosted ? 'Add a Square Terminal device ID to this location to charge cards on a terminal.' : ''}</p>` : `<div class="row"><button class="btn" data-act="printReceipt" data-id="${esc(s.id)}">Print receipt</button><button class="btn" data-act="openTicket" data-id="${esc(s.id)}">Details</button><button class="btn" data-act="deskClear">Next car</button></div>`}
+        <p class="note" style="margin:0">${due > 0 && !can('tickets.adjust') ? 'Only a manager or owner can let a car out with money owed. ' : ''}Cash and external card payments are recorded here and go on the shift report. ${terminal ? 'Square Terminal sends the amount to the booth device for the driver to tap.' : hosted ? 'Add a Square Terminal device ID to this location to charge cards on a terminal.' : ''}</p>` : `<div class="row"><button class="btn" data-act="printReceipt" data-id="${esc(s.id)}">Print receipt</button>${HOSTED ? `<button class="btn" data-act="emailReceipt" data-id="${esc(s.id)}" data-perm="tickets">Email receipt</button>` : ''}<button class="btn" data-act="openTicket" data-id="${esc(s.id)}">Details</button><button class="btn" data-act="deskClear">Next car</button></div>`}
     </div></section>`;
   }
   function billTable(b, s) {
@@ -3005,7 +3050,7 @@ render();boot();
     if (s.startAt) items.push({ at: s.startAt, text: s.manual ? 'Ticket opened' + (s.valet ? ' (valet)' : ' by staff') : s.mode === 'prepaid' ? 'Paid by plate' + (s.prepaidAt ? '' : '') : 'Entered' + (s.entryCameraId ? ' · ' + ((byId('cameras', s.entryCameraId) || {}).name || 'camera') : ''), by: '' });
     if (s.prepaidAt && s.startLpr) items.push({ at: s.prepaidAt, text: 'Prepaid before arrival', by: '' });
     (s.payments || []).forEach(p => items.push({ at: p.at, text: `Payment ${money(p.amount)} · ${(ParkRules.METHODS[p.method] || p.method || '').toLowerCase()}${p.tendered != null ? ` (tendered ${money(p.tendered)})` : ''}${p.note ? ' · ' + p.note : ''}`, by: p.by || '' }));
-    (s.history || []).forEach(h => { if (h.action === 'payment' || h.action === 'created') return; items.push({ at: h.at, text: `${({ validation_applied: 'Validation applied', validation_replaced: 'Validation replaced', validation_removed: 'Validation removed', departed: 'Departed', reopened: 'Reopened', waived: 'Balance waived', waive_removed: 'Waiver removed', fee_adjusted: 'Fee adjusted', note: 'Note', plate_corrected: 'Plate corrected', valet: 'Valet', match_confirmed: 'Plate match confirmed', match_rejected: 'Plate match rejected', missed_exit_resolved: 'Missed exit resolved', sent_to_review: 'Sent to plate review', entry_added: 'Arrival added', dismissed: 'Dismissed', cited: 'Notice issued' })[h.action] || h.action}${h.detail ? ' · ' + h.detail : ''}`, by: h.by || '' }); });
+    (s.history || []).forEach(h => { if (h.action === 'payment' || h.action === 'created') return; items.push({ at: h.at, text: `${({ receipt_emailed: 'Receipt emailed', validation_applied: 'Validation applied', validation_replaced: 'Validation replaced', validation_removed: 'Validation removed', departed: 'Departed', reopened: 'Reopened', waived: 'Balance waived', waive_removed: 'Waiver removed', fee_adjusted: 'Fee adjusted', note: 'Note', plate_corrected: 'Plate corrected', valet: 'Valet', match_confirmed: 'Plate match confirmed', match_rejected: 'Plate match rejected', missed_exit_resolved: 'Missed exit resolved', sent_to_review: 'Sent to plate review', entry_added: 'Arrival added', dismissed: 'Dismissed', cited: 'Notice issued' })[h.action] || h.action}${h.detail ? ' · ' + h.detail : ''}`, by: h.by || '' }); });
     if (s.endAt && !s.closedManually) items.push({ at: s.endAt, text: s.noEntry ? 'Exit read with no matching entry' : s.missedExit ? 'Closed: exit never read (a new entry was seen)' : 'Exited' + (s.exitCameraId ? ' · ' + ((byId('cameras', s.exitCameraId) || {}).name || 'camera') : '') + (s.matchedBy ? ` · read as ${s.exitPlate} (${s.matchedBy === 'fuzzy' ? 'one character off' : s.matchedBy === 'lookalike' ? 'look-alike characters' : s.matchedBy})` : ''), by: '' });
     S.feed.filter(r => r.sessionId === s.id && r.level !== 'ok' && r.level !== 'info').forEach(r => items.push({ at: r.at, text: 'Camera: ' + r.text, by: '' }));
     // Server audit rows: ticket actions already appear above (they write history), so only show direct edits and payment-device events.
@@ -3057,7 +3102,7 @@ render();boot();
             ${!open ? act('adjustFee', 'Adjust fee', 'tickets.adjust') : ''}
             ${s.waived ? act('unwaive', 'Remove waiver', 'tickets.adjust') : (b.due > 0 || open) ? act('waiveSession', 'Waive', 'tickets.adjust') : ''}
             ${act('correctPlate', 'Correct plate', 'tickets.adjust')}${act('addNote', 'Add note', 'tickets')}
-            ${b.paid > 0 || !open ? act('printReceipt', 'Print receipt') : ''}
+            ${b.paid > 0 || !open ? act('printReceipt', 'Print receipt') : ''}${HOSTED && (b.paid > 0 || !open) ? act('emailReceipt', 'Email receipt', 'tickets') : ''}
             ${!open && b.due > 0 && !s.cited && !R.needsReview(s) && !(s.missedExit && !s.missedResolved) ? act('citeSession', 'Issue parking charge notice', 'citations', 'danger') : ''}
             ${open && !s.valet ? act('closeMissed', 'Send to plate review', 'tickets.adjust') : ''}
           </div>
@@ -3294,6 +3339,7 @@ render();boot();
     correctPlate(b) { const s = byId('sessions', b.dataset.id); reasonDialog(b.dataset.id, 'setPlate', `Correct plate ${s.plate}`, 'Save plate', 'Plate corrected', { fields: [{ id: 'plate', label: 'Correct plate', required: true }], args: v => ({ plate: v.plate }) }); },
     addNote(b) { openForm({ title: 'Add note', submit: 'Add note', fields: [{ id: 'text', label: 'Note', type: 'textarea', required: true }], onSubmit: async v => dlgErrorOrOk(await ticketAction(b.dataset.id, 'note', { text: v.text }, 'Note added')) }); },
     printReceipt(b) { window.printReceipt(b.dataset.id); },
+    emailReceipt(b) { window.emailReceiptDialog(b.dataset.id); },
     addEntry(b) { const s = byId('sessions', b.dataset.id); openForm({ title: `Arrival for ${s.plate}`, submit: 'Bill the stay', fields: [{ id: 'startAt', label: 'Arrived at', type: 'datetime-local', value: dtLocal(s.endAt - 2 * H), help: 'Use the entry camera photos or the driver’s word. The exit stays as read.' }], onSubmit: async v => dlgErrorOrOk(await ticketAction(s.id, 'review', { decision: 'createEntry', startAt: new Date(v.startAt).getTime() }, r => `Billed ${money(r.fee)}`)) }); },
     dismissReview(b) { reasonDialog(b.dataset.id, 'review', 'Dismiss this exit', 'Dismiss', 'Dismissed', { args: () => ({ decision: 'dismiss' }) }); },
     valetStatus(b) { ticketAction(b.dataset.id, 'valet', { status: b.dataset.v }, `Marked ${b.dataset.v}`); },
@@ -3625,13 +3671,14 @@ render();boot();
   /* One dialog for every payment. total is what the card is charged (tax included).
      onPay(payment, total) returns {error, amount, code}. When the server says the amount changed, the dialog shows
      the new amount and asks the driver to confirm. The idempotency key stays the same until a definite failure. */
-  function payDialog({ title, base, total, summary, submit, store: storeOnly, onPay }) {
+  function payDialog({ title, base, total, summary, submit, store: storeOnly, onPay, askEmail, email }) {
     const cfg = HX.payments || {}, saved = !storeOnly && HX.account && HX.account.card;
     if (total == null && base != null) total = R.taxOf(base).total;
     let key = newKey(), busy = false, payReq = null;
     dlgCfg = null;
     dlgForm.innerHTML = `<div class="dlg-h"><h2>${esc(title)}</h2><button type="button" class="btn sm" data-dlg="close">Close</button></div>
     <div class="dlg-b">${summary ? `<p style="margin:0 0 8px">${summary}</p>` : ''}${storeOnly ? '' : `<div class="quote" id="payAmt">${money(total)}</div><div class="note" id="payTax">${esc(base != null ? taxNote(base) : taxNote(total))}</div>`}
+      ${askEmail ? `<div class="field" style="margin:12px 0 4px"><label for="payEmail">Email me a receipt (optional)</label><input id="payEmail" type="email" autocomplete="email" inputmode="email" placeholder="you@example.com" value="${esc(email != null ? email : ((HX.account && HX.account.email) || lastEmail()))}"></div>` : ''}
       ${!storeOnly && cfg.enabled ? '<div class="wallets" id="walletBox"></div>' : ''}
       ${saved ? `<div class="paywith"><label><input type="radio" name="payWith" value="saved" checked> ${esc(saved.brand || 'Card')} ending ${esc(saved.last4)}</label><label><input type="radio" name="payWith" value="new"> Use another card</label></div>` : ''}
       <div id="sqWrap" ${saved ? 'hidden' : ''}>${cfg.enabled ? '<div id="sq-card"></div>' : '<div class="callout warn">Test mode: Square isn’t connected yet, so no card is charged.</div>'}</div>
@@ -3645,9 +3692,12 @@ render();boot();
     if (!saved) mount();
     async function submitWith(getPayment) {
       if (busy) return; busy = true; const btn = $('#payGo', dlgForm); btn.disabled = true; err('');
+      const emEl = $('#payEmail', dlgForm), em = emEl ? emEl.value.trim() : '';
+      if (em && !ParkRules.emailOk(em)) { err('Check the email address, or leave it blank.'); busy = false; btn.disabled = false; return; }
+      if (emEl) rememberEmail(em);
       try {
         const payment = Object.assign(await getPayment(), { idempotencyKey: key });
-        const r = await onPay(payment, total);
+        const r = await onPay(payment, total, { email: em });
         if (r && r.error) {
           if (r.amount != null && Math.abs(r.amount - total) > 0.005) { setTotal(r.amount); err(`The price is now ${money(r.amount)}. Tap pay again to confirm.`); }
           else { err(r.error); if (!/^network$/i.test(r.code || '')) key = newKey(); }
@@ -3671,10 +3721,11 @@ render();boot();
       } catch (e) { /* wallets unavailable; card form still works */ }
     })();
   }
-  function done(r, after) { UI.receipt = r.receipt ? Object.assign({}, r.receipt, { url: r.receiptUrl }) : UI.receipt; if (after) after(); render(); window.scrollTo(0, 0); }
+  function done(r, after) { UI.receipt = r.receipt ? Object.assign({}, r.receipt, { url: r.receiptUrl, emailedTo: r.emailedTo || null }) : UI.receipt; if (after) after(); render(); window.scrollTo(0, 0); }
   async function payPortal(op, args, base, title, summary, after, opts) {
-    payDialog({ title, base, summary, onPay: async (payment, total) => {
-      const r = await HX.portal(op, args, payment, opts && opts.noExpect ? undefined : total); if (r.error) return r;
+    payDialog({ title, base, summary, askEmail: true, email: args.email, onPay: async (payment, total, extra) => {
+      const a = extra && extra.email ? Object.assign({}, args, { email: extra.email }) : args;
+      const r = await HX.portal(op, a, payment, opts && opts.noExpect ? undefined : total); if (r.error) return r;
       await refreshLookup(); if (HX.account) refreshAccount(); done(r, after); return { ok: true };
     } });
   }
@@ -3699,6 +3750,8 @@ render();boot();
   const lastPlate = () => { try { return localStorage.getItem('parkops.plate') || ''; } catch (e) { return ''; } };
   const rememberPlate = p => { try { localStorage.setItem('parkops.plate', p); } catch (e) {} };
   const lastPhone = () => { try { return localStorage.getItem('parkops.phone') || ''; } catch (e) { return ''; } };
+  const lastEmail = () => { try { return localStorage.getItem('parkops.email') || ''; } catch (e) { return ''; } };
+  const rememberEmail = e => { try { if (e) localStorage.setItem('parkops.email', e); else localStorage.removeItem('parkops.email'); } catch (x) {} };
 
   function acctPlates() { return (HX.account && HX.account.plates) || []; }
   function plateField(id, label, value) {
@@ -3961,7 +4014,7 @@ render();boot();
     return `<div class="enf" style="max-width:980px">
     ${lotMode ? '' : `<section class="portal-hero"><h1>Parking at ${esc(campusName())}</h1><p>Pay by plate, get monthly parking, reserve a guaranteed spot, or settle a parking notice. Garages read your plate at entry and exit, so there’s no ticket.</p></section>`}
     <nav class="pnav" aria-label="Driver portal">${tabs.map(([k, l]) => `<button data-act="pv" data-v="${k}" aria-pressed="${UI.pv === k}">${l}</button>`).join('')}</nav>
-    ${UI.receipt ? `<div class="receipt" role="status"><b>${esc(UI.receipt.title)}</b><br>${esc(UI.receipt.body)}${UI.receipt.url ? ` <a href="${esc(UI.receipt.url)}" target="_blank" rel="noopener">View receipt</a>` : ''}${ratingWidget(UI.receipt)}</div>` : ''}
+    ${UI.receipt ? `<div class="receipt" role="status"><b>${esc(UI.receipt.title)}</b><br>${esc(UI.receipt.body)}${UI.receipt.url ? ` <a href="${esc(UI.receipt.url)}" target="_blank" rel="noopener">View receipt</a>` : ''}${UI.receipt.emailedTo ? `<br><span class="note">Receipt emailed to ${esc(UI.receipt.emailedTo)}.</span>` : ''}${ratingWidget(UI.receipt)}</div>` : ''}
     ${body()}
     ${HX.payments && !HX.payments.enabled ? '<p class="note" style="text-align:center">Test mode: payments are simulated until Square is connected.</p>' : ''}</div>`;
   };
