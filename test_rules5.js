@@ -48,6 +48,10 @@ assert.strictEqual(R.entryDue(ev2), 25, 'but the attendant can collect the $25 e
 r = R.TICKET.pay(ev2, { method: 'card', amount: 25, by: 'Att' }); assert.ok(!r.error, r.error); apply(r.ops);
 assert.ok(!S.sessions.find(s => s.id === ev2.id).endAt, 'the ticket stays open after paying at the entrance');
 assert.strictEqual(R.entryDue(ev2), 0, 'nothing more to collect at the entrance');
+T = ct(9, 18, 9);
+assert.strictEqual(R.sessionFee(ev2, ct(9, 18, 9)), 25, 'paid at the entrance, left inside the grace period: the $25 stands');
+r = R.TICKET.create({ plate: 'TURN1', facilityId: 'g3', startAt: ct(9, 18, 6) }); apply(r.ops);
+assert.strictEqual(R.sessionFee(S.sessions.find(s => s.id === r.sessionId), ct(9, 18, 9)), 0, 'turned away without paying inside the grace period: free');
 T = ct(9, 22);
 assert.strictEqual(R.balanceOf(ev2), 0, 'leaving before 3 AM: already paid');
 T = ct(10, 5);
@@ -100,5 +104,39 @@ if (libPath) {
   const got = parseRead({}, 'application/json', Buffer.from(JSON.stringify(axis)));
   assert.strictEqual(got.plate, 'ABC123'); assert.strictEqual(got.confidence, 91);
   assert.ok(parseRead({}, 'application/json', Buffer.from(JSON.stringify(Object.assign({}, axis, { carState: 'update' })))).ignore, 'Axis update/lost messages are not new cars');
+}
+// ---- patrol log: what a plate check found, violator or not, and why
+{
+  T = ct(10, 13); S.sessions = []; S.citations = []; S.vips = [];
+  S.permits = [{ id: 'pm1', number: 'M1', holder: 'Pat', permitTypeId: 'm7', plates: ['MON7'], status: 'active', startAt: T - 864e5 }];
+  apply([{ type: 'set', coll: 'sessions', id: 'pp1', data: { plate: 'PAID7', facilityId: 'l7', mode: 'prepaid', kind: 'visitor', startAt: T - H, paidUntil: T + H, endAt: null, payments: [{ amount: 15, at: T - H }] } },
+    { type: 'set', coll: 'sessions', id: 'pp2', data: { plate: 'LATE7', facilityId: 'l7', mode: 'prepaid', kind: 'visitor', startAt: T - 3 * H, paidUntil: T - H, endAt: null, payments: [{ amount: 15, at: T - 3 * H }] } },
+    { type: 'set', coll: 'sessions', id: 'pp3', data: { plate: 'GRACE7', facilityId: 'l7', mode: 'prepaid', kind: 'visitor', startAt: T - 2 * H, paidUntil: T - 5 * M, endAt: null, payments: [{ amount: 15, at: T - 2 * H }] } },
+    { type: 'set', coll: 'sessions', id: 'pg1', data: { plate: 'VAL4', facilityId: 'g4', mode: 'lpr', kind: 'visitor', startAt: T - H, endAt: null, validation: { code: 'BURGER', tenantName: 'Burger place' } } },
+    { type: 'set', coll: 'sessions', id: 'pg2', data: { plate: 'EXIT4', facilityId: 'g4', mode: 'lpr', kind: 'visitor', startAt: T - H, endAt: null } }]);
+  const k = (pl, f) => R.checkKind(R.checkPlate(pl, f));
+  assert.deepStrictEqual(k('MON7', 'l7'), { violator: false, kind: 'monthly', label: 'Monthly parker' });
+  assert.strictEqual(k('PAID7', 'l7').kind, 'paid');
+  assert.strictEqual(k('GRACE7', 'l7').kind, 'grace', 'expired inside the grace period is not a violation');
+  assert.ok(k('LATE7', 'l7').violator && k('LATE7', 'l7').kind === 'expired', 'paid time expired is a violation');
+  assert.ok(k('NOBODY', 'l7').violator && k('NOBODY', 'l7').kind === 'nopermit', 'no payment or monthly is a violation');
+  assert.ok(k('MON7', 'l15').violator && k('MON7', 'l15').kind === 'wrongzone', 'monthly at another lot is a violation');
+  assert.strictEqual(k('VAL4', 'g4').kind, 'validated');
+  assert.strictEqual(k('EXIT4', 'g4').kind, 'exit');
+  S.permits = []; S.sessions = [];
+}
+// ---- the server's plate index gives the same answers as reading every ticket
+{
+  T = ct(10, 13); S.citations = []; S.permits = [];
+  S.sessions = [];
+  for (let i = 0; i < 60; i++) S.sessions.push({ id: 'ix' + i, plate: i % 3 ? 'ab-' + (i % 7) : 'AB' + (i % 7), facilityId: i % 2 ? 'g4' : 'l7', mode: i % 2 ? 'lpr' : 'prepaid', kind: 'visitor', startAt: T - (i + 1) * H, paidUntil: T - (i % 4) * H + H, endAt: i % 5 === 0 ? null : T - i * 6e4, payments: [], fee: i % 4 ? 10 : 0 });
+  const snap = () => ['AB1', 'AB3', 'AB5', 'ZZ9'].map(pl => JSON.stringify([R.liveForPlate(pl), R.liveForPlate(pl, 'g4'), R.checkPlate(pl, 'l7').title, R.checkPlate(pl, 'g4').lines, R.lookup(pl), R.plateDebt(pl)]));
+  const plain = snap();
+  const ix = new Map(); S.sessions.forEach(d => { const k = Rules.normPlate(d.plate); (ix.get(k) || ix.set(k, []).get(k)).push(d); });
+  S.__byPlate = ix; S.__byPlateArr = S.sessions;
+  assert.deepStrictEqual(snap(), plain, 'indexed lookups match full scans');
+  S.sessions = S.sessions.slice(); // a new list without a new index: the rules stop trusting the old one
+  assert.deepStrictEqual(snap(), plain);
+  delete S.__byPlate; delete S.__byPlateArr; S.sessions = [];
 }
 console.log('rules5 ok');

@@ -5,7 +5,10 @@
 (function (root) {
   'use strict';
   const M = 6e4, H = 36e5, D = 864e5;
-  const normPlate = p => String(p || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+  /* Plates are compared thousands of times a second on a busy night (every lookup walks the day's tickets), so the cleaned-up
+     form of each plate string is remembered. */
+  const plateMemo = new Map();
+  const normPlate = p => { if (typeof p !== 'string') return String(p || '').toUpperCase().replace(/[^A-Z0-9]/g, ''); let v = plateMemo.get(p); if (v === undefined) { v = p.toUpperCase().replace(/[^A-Z0-9]/g, ''); if (plateMemo.size > 50000) plateMemo.clear(); plateMemo.set(p, v); } return v; };
   const CONF = { O: '0', Q: '0', D: '0', I: '1', L: '1', B: '8', S: '5', Z: '2', G: '6' };
   const canon = p => normPlate(p).replace(/[OQDILBSZG]/g, c => CONF[c]);
   const NOREAD = /^(|UNKNOWN|NOPLATE|NOREAD|NONE|0+)$/;
@@ -72,6 +75,10 @@
     opts = opts || {};
     const cfg = () => S.config || {};
     const L = k => S[k] || [];
+    /* One plate's tickets. The server keeps an index by plate (S.__byPlate, for the list it was built from); without one,
+       every ticket is looked at. Either way the same tickets come back, oldest first. */
+    const byStart = (a, b) => (a.startAt || a.endAt || 0) - (b.startAt || b.endAt || 0);
+    const ofPlate = pl => { const ix = S.__byPlate; if (ix && S.__byPlateArr === S.sessions) return (ix.get(pl) || []).slice().sort(byStart); return L('sessions').filter(s => normPlate(s.plate) === pl).sort(byStart); };
     const fac = id => L('facilities').find(f => f.id === id);
     const ptype = id => L('permitTypes').find(t => t.id === id);
     const tenant = id => L('tenants').find(t => t.id === id);
@@ -207,6 +214,18 @@
       return out;
     }
     const charge = (f, start, end, val) => priceDetail(f, start, end, val).amount;
+    /* A ticket's price: charge() for its stay, except that a car which already paid the flat event rate at the
+       entrance keeps that price even if it leaves inside the grace period. A car turned away without paying still
+       leaves free. */
+    function stayDetail(s, end, val) {
+      const f = facFor(s), pd = priceDetail(f, s.startAt, end, val);
+      if (pd.rule === 'grace' && !val && paidOf(s) > 0) {
+        const ev = eventAt(f, s.startAt);
+        if (ev && ev.flat) return Object.assign(pd, { amount: round2(+ev.price), rule: ev.name || 'event', special: { name: ev.name || 'event', price: +ev.price, flat: true } });
+      }
+      return pd;
+    }
+    const stayCharge = (s, end, val) => stayDetail(s, end, val).amount;
     function rateSummary(f) {
       const r = (f && f.rates) || {}, out = [], dn = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
       const t12 = x => { const m = hm(x), h = Math.floor(m / 60), mm = m % 60; return (h % 12 || 12) + (mm ? ':' + pad2(mm) : '') + (h < 12 ? 'am' : 'pm'); };
@@ -240,7 +259,7 @@
       if (freeKind(s) || s.noEntry || s.noPlate) return 0;
       if (s.mode === 'prepaid' && !s.endAt) return paidOf(s);
       if (s.endAt && s.fee != null && !end) return +s.fee;
-      return charge(facFor(s), s.startAt, end || s.endAt || now(), s.validation);
+      return stayCharge(s, end || s.endAt || now(), s.validation);
     }
     const needsReview = s => !!(s.matchedBy && !s.matchConfirmed);
     /* What an open ticket can be paid at the entrance on an event night: the flat event price less anything already
@@ -256,7 +275,7 @@
     /* Full bill for a ticket: parking breakdown, extras, late fee, payments, balance, tax. */
     function ticketBill(s, end) {
       const f = facFor(s), prepaidOpen = s.mode === 'prepaid' && !s.endAt && !end, at = end || s.endAt || (prepaidOpen ? Math.max(s.paidUntil || 0, s.startAt || 0) : now());
-      const pd = (freeKind(s) || s.noEntry || s.noPlate) ? { amount: 0, rule: s.kind === 'permit' ? 'monthly' : s.vipFree ? 'vip' : 'none', days: [], standard: 0, special: null, discount: 0, freeMinutes: 0 } : priceDetail(f, s.startAt, at, s.validation);
+      const pd = (freeKind(s) || s.noEntry || s.noPlate) ? { amount: 0, rule: s.kind === 'permit' ? 'monthly' : s.vipFree ? 'vip' : 'none', days: [], standard: 0, special: null, discount: 0, freeMinutes: 0 } : stayDetail(s, at, s.validation);
       const parking = s.endAt && s.fee != null && !end ? +s.fee : prepaidOpen ? paidOf(s) : pd.amount;
       const adjusted = s.endAt && s.fee != null && s.feeOriginal != null && Math.abs(+s.fee - +s.feeOriginal) > 0.004;
       const extras = extrasOf(s), late = +s.lateFee || 0, paid = paidOf(s);
@@ -305,7 +324,7 @@
 
     /* ---------- collections ---------- */
     function plateDebt(pl) {
-      const owed = L('sessions').filter(s => normPlate(s.plate) === pl && s.endAt && balanceOf(s) > 0);
+      const owed = ofPlate(pl).filter(s => s.endAt && balanceOf(s) > 0);
       const cits = L('citations').filter(c => normPlate(c.plate) === pl && c.status === 'open');
       return { owed, cits, total: round2(sum(owed, balanceOf) + sum(cits, c => c.fine)), count: owed.length + cits.length };
     }
@@ -430,7 +449,7 @@
           ops.push({ type: 'set', coll: 'sessions', id, data: Object.assign({ plate: 'NOREAD', noPlate: true, mode: 'lpr', kind: 'unknown', ticket: ticketNo(), startAt: at, endAt: null, payments: [] }, base) });
           res = { level: 'warn', text: 'Vehicle entered without a readable plate, counted as unknown', sessionId: id };
         } else {
-          const live = L('sessions').filter(s => s.facilityId === facilityId && !s.endAt && normPlate(s.plate) === pl).sort((a, b) => b.startAt - a.startAt)[0];
+          const live = ofPlate(pl).filter(s => s.facilityId === facilityId && !s.endAt).sort((a, b) => b.startAt - a.startAt)[0];
           if (live && live.mode === 'lpr' && at - live.startAt < 3 * M) {
             res = { level: 'info', text: 'Duplicate entry read ignored', sessionId: live.id, duplicate: true };
           } else {
@@ -473,14 +492,14 @@
             res = { level: 'bad', text: 'Exit with no matching entry. Not charged. Review entry camera.', sessionId: id };
           } else {
             const s = m.s;
-            const fee = freeKind(s) ? 0 : charge(facFor(s), s.startAt, at, s.validation);
+            const fee = freeKind(s) ? 0 : stayCharge(s, at, s.validation);
             const paid = paidOf(s); let bal = Math.max(0, round2(fee + extrasOf(s) - paid));
             const payments = (s.payments || []).slice();
             const member = s.memberId ? L('members').find(x => x.id === s.memberId) : memberForPlate(normPlate(s.plate));
             if (s.waived) { res = { level: 'ok', text: 'Exited, balance waived' }; bal = 0; }
             else if (bal > 0 && m.how !== 'exact') res = { level: 'warn', text: 'Exit read as ' + pl + ' matched ' + s.plate + ' (' + m.how + '). ' + money(bal) + ' held for staff review, not charged' };
             else if (bal > 0 && member && opts.deferAutopay) {
-              const past = cfg().collectPastDue === false ? [] : L('sessions').filter(x => x.id !== s.id && normPlate(x.plate) === normPlate(s.plate) && x.endAt && balanceOf(x) > 0);
+              const past = cfg().collectPastDue === false ? [] : ofPlate(normPlate(s.plate)).filter(x => x.id !== s.id && x.endAt && balanceOf(x) > 0);
               res = { level: 'ok', text: 'Charging ' + money(bal + sum(past, balanceOf)) + ' to card on file' + (past.length ? ' (includes ' + past.length + ' past-due)' : ''), charge: { memberId: member.id, items: [{ sessionId: s.id, amount: bal }].concat(past.map(x => ({ sessionId: x.id, amount: balanceOf(x) }))) } };
             }
             else if (bal > 0 && member) { payments.push({ amount: bal, at, method: 'autopay' }); res = { level: 'ok', text: 'Charged ' + money(bal) + ' to card on file' }; bal = 0; }
@@ -510,10 +529,10 @@
       const permits = permitsForPlate(pl), valid = permits.filter(permitValid);
       const here = valid.find(p => permitCovers(p, facId));
       const vip = vipForPlate(pl, facId);
-      const sess = L('sessions').filter(s => normPlate(s.plate) === pl && s.facilityId === facId && isLive(s)).sort((a, b) => b.startAt - a.startAt)[0];
+      const sess = ofPlate(pl).filter(s => s.facilityId === facId && isLive(s)).sort((a, b) => b.startAt - a.startAt)[0];
       const member = memberForPlate(pl);
       const openC = L('citations').filter(c => normPlate(c.plate) === pl && (c.status === 'open' || c.status === 'appeal'));
-      const owed = L('sessions').filter(s => normPlate(s.plate) === pl && s.endAt && balanceOf(s) > 0);
+      const owed = ofPlate(pl).filter(s => s.endAt && balanceOf(s) > 0);
       const r = { plate: pl, facId, level: 'bad', title: 'No permit or payment', lines: [], suggest: 'NOPERMIT', permits, member, openC, owed, sess, vip };
       const dstr = t => new Date(t).toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: tzOf(f) });
       if (here) { const t = ptype(here.permitTypeId); r.level = 'ok'; r.title = 'Monthly parker'; r.suggest = null; r.lines.push((t ? t.name : 'Monthly') + ' · #' + here.number + ' · ' + here.holder + (here.companyName ? ' (' + here.companyName + ')' : ''), here.endAt ? 'Ends ' + dstr(here.endAt) : here.paidThrough ? 'Paid through ' + dstr(here.paidThrough - 1) : 'Active'); }
@@ -543,6 +562,20 @@
       const hot = isHot(pl); if (hot) { r.hot = hot; r.lines.push('Hot list: ' + money(hot.total) + ' owed across ' + hot.count + ' item' + (hot.count > 1 ? 's' : '')); }
       r.towEligible = openC.length >= 3 || !!hot;
       return r;
+    }
+    /* What a plate check found, for the patrol log: a violator (the check suggests a notice) or not, and why in a word or two. */
+    function checkKind(r) {
+      if (!r) return { violator: false, kind: 'other', label: 'Checked' };
+      if (r.suggest) return { violator: true, kind: String(r.suggest).toLowerCase(), label: r.title };
+      const t = r.title || '';
+      if (/^Monthly parker/.test(t)) return { violator: false, kind: 'monthly', label: 'Monthly parker' };
+      if (/^VIP/.test(t)) return { violator: false, kind: 'vip', label: 'VIP' };
+      if (/^Reservation/.test(t)) return { violator: false, kind: 'reservation', label: 'Reservation' };
+      if (/within grace/.test(t)) return { violator: false, kind: 'grace', label: 'In grace period' };
+      if (/^Paid session/.test(t)) return { violator: false, kind: 'paid', label: 'Paid' };
+      if (r.sess && r.sess.validation) return { violator: false, kind: 'validated', label: 'Validated' };
+      if (r.sess) return { violator: false, kind: 'exit', label: 'Pays on exit' };
+      return { violator: false, kind: 'other', label: t || 'OK' };
     }
 
     /* ---------- validations & tenants ---------- */
@@ -626,7 +659,7 @@
     /* ---------- vehicle profile ---------- */
     function vehicleProfile(plate) {
       const pl = normPlate(plate); if (!pl) return null;
-      const sessions = L('sessions').filter(s => normPlate(s.plate) === pl).sort((a, b) => (b.startAt || b.endAt || 0) - (a.startAt || a.endAt || 0));
+      const sessions = ofPlate(pl).sort((a, b) => (b.startAt || b.endAt || 0) - (a.startAt || a.endAt || 0));
       const closed = sessions.filter(s => s.startAt && s.endAt);
       const paid = round2(sum(sessions, paidOf)), debt = plateDebt(pl);
       return { plate: pl, sessions, citations: L('citations').filter(c => normPlate(c.plate) === pl).sort((a, b) => b.issuedAt - a.issuedAt), permits: permitsForPlate(pl), member: memberForPlate(pl), vip: vipForPlate(pl), reservations: L('reservations').filter(r => resPlates(r).includes(pl)).sort((a, b) => b.start - a.start),
@@ -636,7 +669,7 @@
 
     /* ---------- staff ticket actions ----------
        Every action returns ops and writes a line into the ticket's history. Roles are checked by the caller. */
-    const closeData = (s, at) => ({ endAt: at, fee: freeKind(s) ? 0 : charge(facFor(s), s.startAt, at, s.validation), exitCameraId: null, exitPhotoId: null, closedManually: true });
+    const closeData = (s, at) => ({ endAt: at, fee: freeKind(s) ? 0 : stayCharge(s, at, s.validation), exitCameraId: null, exitPhotoId: null, closedManually: true });
     const TICKET = {
       create(a) {
         const pl = normPlate(a.plate), f = fac(a.facilityId), t = now(), startAt = +a.startAt || t;
@@ -792,7 +825,7 @@
     };
 
     /* ---------- driver portal planners ---------- */
-    function liveForPlate(pl, facId) { return L('sessions').filter(s => normPlate(s.plate) === pl && (!facId || s.facilityId === facId) && isLive(s)).sort((a, b) => b.startAt - a.startAt)[0]; }
+    function liveForPlate(pl, facId) { return ofPlate(pl).filter(s => (!facId || s.facilityId === facId) && isLive(s)).sort((a, b) => b.startAt - a.startAt)[0]; }
     function quote(facilityId, hours, untilEndOfDay, plate) {
       const f = fac(facilityId); if (!f) return 0;
       const t = now(), live = plate ? liveForPlate(normPlate(plate), f.id) : null, from = live && live.paidUntil > t ? live.paidUntil : t;
@@ -992,13 +1025,13 @@
         reservations: L('reservations').filter(r => resPlates(r).includes(pl) && resActive(r)).map(r => ({ start: r.start, end: r.end, status: r.status })),
         member: memberForPlate(pl) ? { autopay: true } : null,
         vip: vip ? { freeParking: !!vip.freeParking } : null,
-        live: L('sessions').filter(s => normPlate(s.plate) === pl && isLive(s) && !s.noPlate).map(s => ({ id: s.id, ticket: ticketOf(s), mode: s.mode, paidUntil: s.paidUntil || null, startAt: s.startAt, fee: sessionFee(s), validation: s.validation ? s.validation.code : null })),
-        owed: L('sessions').filter(s => normPlate(s.plate) === pl && s.endAt && balanceOf(s) > 0).map(s => ({ id: s.id, ticket: ticketOf(s), facilityName: fname(s.facilityId), endAt: s.endAt, balance: balanceOf(s), lateFee: +s.lateFee || 0 })),
+        live: ofPlate(pl).filter(s => isLive(s) && !s.noPlate).map(s => ({ id: s.id, ticket: ticketOf(s), mode: s.mode, paidUntil: s.paidUntil || null, startAt: s.startAt, fee: sessionFee(s), validation: s.validation ? s.validation.code : null })),
+        owed: ofPlate(pl).filter(s => s.endAt && balanceOf(s) > 0).map(s => ({ id: s.id, ticket: ticketOf(s), facilityName: fname(s.facilityId), endAt: s.endAt, balance: balanceOf(s), lateFee: +s.lateFee || 0 })),
         citations: L('citations').filter(c => normPlate(c.plate) === pl && c.status !== 'voided').sort((a, b) => b.issuedAt - a.issuedAt).map(c => ({ id: c.id, photoIds: c.photoIds || [], number: c.number, violationName: c.violationName, fine: c.fine, facilityName: fname(c.facilityId), issuedAt: c.issuedAt, status: c.status, hasAppeal: !!c.appeal, appealDecision: c.appeal && c.appeal.decision || null })),
       };
     }
 
-    return { newMonthlyNumber, accountRoom, accountUsed, planAccountParkers, ROLES, ROLE_NAMES, METHODS, can, canonRole, ticketOf, ticketNo, snapRates, facFor, histAdd, endOfDate, ticketBill, extrasOf, freeKind, validPermitFor, vipForPlate, sessionsForCode, codeOccupancy, arAging, vehicleProfile, validationText, staleHours, TICKET, prorate, priceDetail, rateSummary, taxOf, specialQualifies, monthBounds, planMonthlyDue, sessionByToken, needsReview, cfg, plateDebt, isHot, hotList, planCollections, resAvailability, reservationFor, activeReservation, planNoShows, resActive, resPlates, M, H, D, normPlate, canon, uid, round2, money, sum, now, fac, ptype, tenant, camera, tzOf, dayStart, nextDayStart, charge, paidOf, sessionFee, balanceOf, isLive, onSiteSessions, occupancy, spaceUse, homeOf, repeatValidations, isEvent, eventAt, entryDue, permitValid, permitCovers, permitsForPlate, memberForPlate, soldOf, unpaidSessions, exitStatus, findLive, planRead, checkPlate, findValidation, planApplyValidation, sessionsForTenant, concurrency, tenantDays, PORTAL, lookup, quote, liveForPlate };
+    return { newMonthlyNumber, accountRoom, accountUsed, planAccountParkers, ROLES, ROLE_NAMES, METHODS, can, canonRole, ticketOf, ticketNo, snapRates, facFor, histAdd, endOfDate, ticketBill, extrasOf, freeKind, validPermitFor, vipForPlate, sessionsForCode, codeOccupancy, arAging, vehicleProfile, validationText, staleHours, TICKET, prorate, priceDetail, rateSummary, taxOf, specialQualifies, monthBounds, planMonthlyDue, sessionByToken, needsReview, cfg, plateDebt, isHot, hotList, planCollections, resAvailability, reservationFor, activeReservation, planNoShows, resActive, resPlates, M, H, D, normPlate, canon, uid, round2, money, sum, now, fac, ptype, tenant, camera, tzOf, dayStart, nextDayStart, charge, paidOf, sessionFee, balanceOf, isLive, onSiteSessions, occupancy, spaceUse, homeOf, repeatValidations, isEvent, eventAt, entryDue, permitValid, permitCovers, permitsForPlate, memberForPlate, soldOf, unpaidSessions, exitStatus, findLive, planRead, checkPlate, checkKind, findValidation, planApplyValidation, sessionsForTenant, concurrency, tenantDays, PORTAL, lookup, quote, liveForPlate };
   }
   Rules.normPlate = normPlate; Rules.ROLES = ROLES; Rules.ROLE_NAMES = ROLE_NAMES; Rules.can = can; Rules.canonRole = canonRole; Rules.METHODS = METHODS;
   if (typeof module !== 'undefined' && module.exports) module.exports = Rules; else root.ParkRules = Rules;

@@ -80,11 +80,13 @@
   };
   window.validateTicketDialog = function (id) {
     const s = byId('sessions', id); if (!s) return;
-    const codes = S.validations.filter(v => v.active && !R.findValidation(v.code, s.facilityId).error).sort((a, b) => a.code.localeCompare(b.code));
+    // On an event night only codes marked for event nights can be applied, so only those are offered.
+    const ev = R.eventAt(R.facFor(s), s.startAt);
+    const codes = S.validations.filter(v => v.active && !R.findValidation(v.code, s.facilityId).error && (!ev || v.eventNights)).sort((a, b) => a.code.localeCompare(b.code));
     const opts = codes.map(v => [v.code, `${v.code} · ${(v.tenantId && (byId('tenants', v.tenantId) || {}).name) || v.department || v.name || ''} · ${R.validationText(v)}`]);
-    if (!opts.length) { toast('No validation code is valid at ' + fname(s.facilityId) + ' right now.', true); return; }
+    if (!opts.length) { toast(ev ? `No event-night codes work at ${fname(s.facilityId)}. Mark a code “Works on event nights” under Validations.` : 'No validation code is valid at ' + fname(s.facilityId) + ' right now.', true); return; }
     openForm({ title: (s.validation ? 'Replace validation on ' : 'Validate ') + s.plate, submit: 'Apply code', fields: [
-      { id: 'code', label: 'Validation code', type: 'select', options: opts, value: opts[0][0], help: 'Only codes valid at ' + fname(s.facilityId) + ' are listed.' },
+      { id: 'code', label: 'Validation code', type: 'select', options: opts, value: opts[0][0], help: ev ? `${ev.name || 'Event'} night: only codes that work on event nights are listed.` : 'Only codes valid at ' + fname(s.facilityId) + ' are listed.' },
       ...(s.validation ? [{ id: 'reason', label: `Reason for replacing ${s.validation.code}`, required: true }] : []),
     ], onSubmit: async v => { if (!v.code) return 'Create a validation code first.'; const r = await ticketAction(id, 'validate', { code: v.code, replace: !!s.validation, reason: v.reason }, 'Validation applied'); return dlgErrorOrOk(r); } });
   };

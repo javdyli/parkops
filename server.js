@@ -49,13 +49,20 @@ const store = makeStore();
 let auth, photos;
 const cfg = () => S.config || {};
 
+/* Tickets by plate, kept in step with S.sessions, so looking up one plate doesn't mean reading every ticket in memory
+   (the rules use it only while S.__byPlateArr is the current list). */
+const plateIx = new Map();
+function ixDrop(d) { if (!d) return; const k = Rules.normPlate(d.plate), a = plateIx.get(k); if (!a) return; const j = a.indexOf(d); if (j >= 0) a.splice(j, 1); if (!a.length) plateIx.delete(k); }
+function ixAdd(d) { const k = Rules.normPlate(d.plate), a = plateIx.get(k); if (a) a.push(d); else plateIx.set(k, [d]); }
+function rebuildPlateIndex() { plateIx.clear(); for (const d of S.sessions) ixAdd(d); S.__byPlate = plateIx; S.__byPlateArr = S.sessions; }
 function applyDoc(coll, id, data) {
   if (coll === 'settings') { if (id === 'config') S.config = data; return; }
   const arr = S[coll]; if (!arr) return;
-  const i = arr.findIndex(x => x.id === id);
-  if (data === null) { if (i >= 0) arr.splice(i, 1); return; }
+  const i = arr.findIndex(x => x.id === id), ix = coll === 'sessions' && S.__byPlateArr === arr;
+  if (data === null) { if (i >= 0) { if (ix) ixDrop(arr[i]); arr.splice(i, 1); } return; }
   const d = Object.assign({ id }, data);
-  if (i >= 0) arr[i] = d; else arr.push(d);
+  if (i >= 0) { if (ix) ixDrop(arr[i]); arr[i] = d; } else arr.push(d);
+  if (ix) ixAdd(d);
 }
 const strip = d => { const o = Object.assign({}, d); delete o.id; return o; };
 /* Webhook and portal tokens never go into the audit log (attendants can read a ticket’s trail). */
@@ -169,6 +176,13 @@ function send(res, code, body, extra) {
   /* Big pages and lists (the console's first load, History, Activity) are compressed when the browser accepts it: about 10x smaller. */
   if (out.length > 2048 && code === 200 && !h['Content-Encoding'] && /\bgzip\b/.test(String((res.req && res.req.headers['accept-encoding']) || ''))) {
     let gz = typeof out === 'object' ? gzCache.get(out) : null;
+    /* Big answers (a staff screen's first load, exports) are compressed off the main thread, so a few screens loading at
+       once don't hold up camera reads and payments. */
+    if (!gz && out.length > 65536 && typeof out !== 'object') {
+      h['Content-Encoding'] = 'gzip'; h['Vary'] = 'Accept-Encoding';
+      zlib.gzip(out, { level: 5 }, (err, z) => { if (res.destroyed) return; if (err) { delete h['Content-Encoding']; z = out; } res.writeHead(code, headers(h)); res.end(z); });
+      return;
+    }
     if (!gz) { gz = zlib.gzipSync(out, { level: 5 }); if (typeof out === 'object') gzCache.set(out, gz); }
     out = gz; h['Content-Encoding'] = 'gzip'; h['Vary'] = 'Accept-Encoding';
   }
@@ -187,19 +201,35 @@ async function readJson(req) { const b = await readBody(req, 2 * 1024 * 1024); i
 const cookie = (req, name) => { const m = new RegExp('(?:^|;\\s*)' + name + '=([^;]+)').exec(req.headers.cookie || ''); return m ? decodeURIComponent(m[1]) : null; };
 const setCookie = (name, val, maxAge) => `${name}=${encodeURIComponent(val)}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${maxAge}${BASE.startsWith('https') ? '; Secure' : ''}`;
 /* Client address: only trust X-Forwarded-For entries added by our own proxy hops. */
+/* CLIENT_IP_HEADER: when the host puts the visitor's address in a header of its own (for example cf-connecting-ip behind
+   Cloudflare), name it here. Settings → System shows what the server sees, so you can tell whether it's needed. */
+const CLIENT_IP_HEADER = String(process.env.CLIENT_IP_HEADER || '').trim().toLowerCase();
 function clientIp(req) {
   const sock = req.socket.remoteAddress || '';
+  if (CLIENT_IP_HEADER && req.headers[CLIENT_IP_HEADER]) return String(req.headers[CLIENT_IP_HEADER]).split(',')[0].trim();
   if (!TRUST_PROXY) return sock;
   const xff = String(req.headers['x-forwarded-for'] || '').split(',').map(s => s.trim()).filter(Boolean);
   return xff.length >= TRUST_PROXY ? xff[xff.length - TRUST_PROXY] : sock;
 }
 const buckets = new Map();
-function limited(req, key, perMin) {
-  if (buckets.size > 50000) buckets.clear();
-  const k = key + ':' + clientIp(req), t = Date.now(); const b = buckets.get(k) || { n: 0, t };
+/* perMin requests a minute from one internet address. `extra` narrows the bucket (one plate, one notice), so a crowd sharing
+   one address (venue Wi-Fi, a phone carrier) isn't limited as if it were one person. */
+function limited(req, key, perMin, extra) {
+  if (buckets.size > 100000) buckets.clear();
+  const k = key + ':' + clientIp(req) + (extra ? ':' + extra : ''), t = Date.now(); const b = buckets.get(k) || { n: 0, t };
   if (t - b.t > 60000) { b.n = 0; b.t = t; } b.n++; buckets.set(k, b); return b.n > perMin;
 }
-setInterval(() => { const t = Date.now(); for (const [k, b] of buckets) if (t - b.t > 120000) buckets.delete(k); }, 60000).unref();
+setInterval(() => { const t = Date.now(); for (const [k, b] of buckets) if (t - b.t > 120000) buckets.delete(k); for (const [k, c] of cardTries) if (t - c.t > 15 * 60000) cardTries.delete(k); }, 60000).unref();
+/* Card testing (someone trying stolen cards one after another) shows up as many declines from one address. A crowd paying
+   on shared Wi-Fi has a few declines among many good payments, so card payments from an address stop for 15 minutes only
+   when at least 10 cards were declined there and they were most of its attempts. */
+const cardTries = new Map();
+const cardKey = req => clientIp(req);
+function cardBlocked(req) { const c = cardTries.get(cardKey(req)); return !!(c && Date.now() - c.t < 15 * 60000 && c.bad >= 10 && c.bad / c.n >= 0.5); }
+function cardTried(req, declined) {
+  const k = cardKey(req), t = Date.now(); let c = cardTries.get(k); if (!c || t - c.t > 15 * 60000) c = { t, n: 0, bad: 0 };
+  c.n++; if (declined) c.bad++; cardTries.set(k, c); if (cardTries.size > 20000) cardTries.delete(cardTries.keys().next().value);
+}
 let idxCache = { m: 0, name: null, buf: null };
 /* The page carries the organization's name (browser tab, home-screen name, top bar) from the first byte, so drivers
    never see the product name flash by before the data loads. */
@@ -208,7 +238,7 @@ const INDEX = () => {
   if (idxCache.m !== m || idxCache.name !== name) {
     let html = fs.readFileSync(f, 'utf8');
     if (name) { const e = escH(name); html = html.replace('<title>ParkOps</title>', `<title>${e}</title>`).replace('name="apple-mobile-web-app-title" content="ParkOps"', `name="apple-mobile-web-app-title" content="${e}"`).replace('<b id="campusName">ParkOps</b>', `<b id="campusName">${e}</b>`); }
-    idxCache = { m, name, buf: Buffer.from(html, 'utf8') };
+    const buf = Buffer.from(html, 'utf8'); idxCache = { m, name, buf, etag: '"' + crypto.createHash('sha1').update(buf).digest('base64url').slice(0, 20) + '"' };
   }
   return idxCache.buf;
 };
@@ -424,7 +454,13 @@ async function handleCamera(req, res, token, query) {
   let body = Buffer.alloc(0);
   try { if (req.method !== 'GET') body = await readBody(req); } catch (e) { return fail(res, 413, 'Payload too large'); }
   const parsed = parseRead(query, req.headers['content-type'], body);
-  if (parsed.ignore) { await commit([{ type: 'update', coll: 'cameras', id: cam.id, data: { lastEventAt: Date.now() } }]); return send(res, 200, { ok: true, ignored: parsed.ignore }); }
+  if (parsed.ignore) {
+    // Keep what the camera sent (images cut out) so the Connect screen can show why it was not a plate read.
+    const q = Object.keys(query || {}).length ? '?' + new URLSearchParams(query).toString() : '';
+    const sample = (req.method + ' ' + (req.headers['content-type'] || '') + ' ' + q + '\n' + body.toString('utf8').replace(/[A-Za-z0-9+/=\r\n]{200,}/g, '<image data>')).slice(0, 800);
+    await commit([{ type: 'update', coll: 'cameras', id: cam.id, data: { lastEventAt: Date.now(), lastIgnored: String(parsed.ignore).slice(0, 80), lastSample: sample } }]);
+    return send(res, 200, { ok: true, ignored: parsed.ignore });
+  }
   const t = Date.now(), pl = Rules.normPlate(parsed.plate), unread = /^(|UNKNOWN|NOPLATE|NOREAD|NONE|0+)$/.test(pl), key = cam.id + ':' + pl;
   if (!unread && recentCam.has(key) && t - recentCam.get(key) < 15000) return send(res, 200, { ok: true, ignored: 'duplicate within 15s' });
   recentCam.set(key, t); if (recentCam.size > 5000) for (const [k, v] of recentCam) if (t - v > 60000) recentCam.delete(k);
@@ -688,7 +724,7 @@ function trimSessions() {
   const closed = []; for (const s of S.sessions) if (s.endAt && !hasDebt(s)) closed.push(s.endAt);
   if (closed.length > KEEP_MAX) { closed.sort((a, b) => b - a); cutoff = Math.max(cutoff, closed[KEEP_MAX - 1]); }
   const before = S.sessions.length;
-  S.sessions = S.sessions.filter(s => !s.endAt || s.endAt >= cutoff || hasDebt(s));
+  S.sessions = S.sessions.filter(s => !s.endAt || s.endAt >= cutoff || hasDebt(s)); rebuildPlateIndex();
   store.since = Math.max(store.since || 0, cutoff);
   return before - S.sessions.length;
 }
@@ -778,6 +814,56 @@ async function activityReport(fromStr, toStr, facility) {
     byFacility: [...byFacility.values()], byMethod: [...byMethod.values()].map(x => ({ method: x.method, count: x.count, amount: r2(x.amount) })).sort((a, b) => b.amount - a.amount), firstTicketAt: store.firstTicketAt() };
 }
 
+/* ---------- patrol log: what officers checked, by day and location ----------
+   A vehicle checked more than once the same day at the same location counts once, and the worst finding stands. Notices come
+   from the notices themselves, so one written at the exit desk, or without a check first, still counts. Voided notices are
+   listed but not counted. Days run midnight to midnight in the organisation's time zone. */
+const KIND_LABEL = { monthly: 'Monthly parker', vip: 'VIP', reservation: 'Reservation', grace: 'In grace period', paid: 'Paid', validated: 'Validated', exit: 'Pays on exit', other: 'Other' };
+function patrolReport(fromStr, toStr, facility) {
+  const days = actDays(fromStr, toStr), from = days[0].s, to = days[days.length - 1].e, idx = actIndex(days);
+  const facName = id => (S.facilities.find(f => f.id === id) || {}).name || 'Unknown location';
+  const veh = new Map();
+  const get = (t, fid, plate) => {
+    const i = idx(t); if (i < 0) return null; const key = days[i].str + '|' + fid + '|' + plate; let v = veh.get(key);
+    if (!v) { v = { date: days[i].str, facilityId: fid, facilityName: facName(fid), plate, first: t, last: t, checks: 0, flagged: false, kind: null, reason: '', lines: [], officers: [], sources: [], notices: [] }; veh.set(key, v); }
+    if (t < v.first) v.first = t; if (t > v.last) v.last = t; return v;
+  };
+  const addOfficer = (v, o) => { o = String(o || '').trim(); if (o && !v.officers.includes(o)) v.officers.push(o); };
+  for (const c of store.checksBetween(from, to, facility)) {
+    const v = get(c.at, c.facility_id || '', c.plate); if (!v) continue;
+    v.checks++; addOfficer(v, c.officer); if (c.source && !v.sources.includes(c.source)) v.sources.push(c.source);
+    if (c.violator || !v.flagged) { v.kind = c.kind; v.reason = c.title || ''; v.lines = (c.detail && c.detail.lines) || []; }
+    if (c.violator) v.flagged = true;
+  }
+  for (const c of S.citations) {
+    if (!(c.issuedAt >= from && c.issuedAt < to) || (facility && c.facilityId !== facility)) continue;
+    const v = get(c.issuedAt, c.facilityId || '', Rules.normPlate(c.plate)); if (!v) continue;
+    v.notices.push({ id: c.id, number: c.number, violation: c.violation, violationName: c.violationName || c.violation, fine: +c.fine || 0, status: c.status, officer: c.officer || '', issuedAt: c.issuedAt });
+    addOfficer(v, c.officer);
+  }
+  const blank = () => ({ checked: 0, violators: 0, flagged: 0, ok: 0, notices: 0, fines: 0 });
+  const dayRows = new Map(days.map(d => [d.str, Object.assign({ date: d.str }, blank())]));
+  const facRows = new Map(S.facilities.filter(f => !facility || f.id === facility).map(f => [f.id, Object.assign({ id: f.id, name: f.name }, blank())]));
+  const offRows = new Map(), reasons = {}, tot = blank();
+  const vehicles = [...veh.values()].map(v => {
+    const live = v.notices.filter(n => n.status !== 'voided');
+    v.result = live.length ? 'violator' : v.flagged || !v.checks ? 'flagged' : 'ok';
+    v.label = v.result === 'violator' ? live[0].violationName : v.result === 'ok' ? KIND_LABEL[v.kind] || v.reason || 'OK' : v.checks ? v.reason || 'Flagged' : 'Notice voided';
+    if (!v.reason) v.reason = v.label;
+    const fines = Math.round(live.reduce((a, n) => a + n.fine, 0) * 100) / 100;
+    const fr = facRows.get(v.facilityId) || facRows.set(v.facilityId, Object.assign({ id: v.facilityId, name: v.facilityName }, blank())).get(v.facilityId);
+    for (const row of [dayRows.get(v.date), fr, tot]) { if (!row) continue; row.checked++; row[v.result === 'violator' ? 'violators' : v.result]++; row.notices += live.length; row.fines = Math.round((row.fines + fines) * 100) / 100; }
+    for (const o of v.officers) { const r = offRows.get(o) || { name: o, checked: 0, notices: 0 }; r.checked++; r.notices += live.filter(n => n.officer === o).length; offRows.set(o, r); }
+    if (v.result === 'ok') reasons[v.label] = (reasons[v.label] || 0) + 1;
+    return v;
+  }).sort((a, b) => b.last - a.last);
+  const MAX = 5000;
+  return { from: fromStr, to: toStr, facility: facility || '', timeZone: cfg().timeZone || 'America/Chicago', totals: tot,
+    days: [...dayRows.values()], byFacility: [...facRows.values()], byOfficer: [...offRows.values()].sort((a, b) => b.checked - a.checked),
+    reasons: Object.entries(reasons).map(([label, n]) => ({ label, n })).sort((a, b) => b.n - a.n),
+    vehicles: vehicles.slice(0, MAX), truncated: vehicles.length > MAX };
+}
+
 /* A private account link can only add so many parkers a day (PORTAL_ADDS_PER_DAY, default 500), so a link that gets out can't flood the lot.
    Counted from the parkers the link itself added in the last 24 hours. */
 const PORTAL_ADDS = Math.max(10, +(process.env.PORTAL_ADDS_PER_DAY || 500));
@@ -855,7 +941,9 @@ async function route(req, res) {
   const p = url.pathname, m = req.method, query = Object.fromEntries(url.searchParams);
   if (p === '/health') { const full = process.env.HEALTH_TOKEN && query.token === process.env.HEALTH_TOKEN; return send(res, 200, full ? { ok: true, store: store.kind, payments: square.live ? square.env : 'simulated', email: mailer.configured, sms: sms.configured, plateReader: plates.configured, lastBackup: lastBackup || null, cameras: S.cameras.map(c => ({ name: c.name, lastReadAt: c.lastReadAt || null })) } : { ok: true }); }
   if (p.startsWith('/lpr/')) { let tok = ''; try { tok = decodeURIComponent(p.slice(5)); } catch (e) { tok = p.slice(5); } return handleCamera(req, res, tok, query); }
-  if (p === '/' && m === 'GET') return send(res, 200, INDEX());
+  /* The page is the same for everyone until an update or a name change, so a phone that has it already (a driver opening
+     the pay link again, a staff screen reloading) gets a 304 and nothing to download. */
+  if (p === '/' && m === 'GET') { const buf = INDEX(), et = idxCache.etag; if (et && req.headers['if-none-match'] === et) { res.writeHead(304, headers({ ETag: et, 'Cache-Control': 'no-cache' })); return res.end(); } return send(res, 200, buf, { ETag: et, 'Cache-Control': 'no-cache' }); }
   if (p === '/.well-known/apple-developer-merchantid-domain-association') {
     const f = process.env.APPLE_PAY_DOMAIN_FILE || path.join(store.dir, 'apple-developer-merchantid-domain-association');
     return fs.existsSync(f) ? stream(res, f, 'text/plain') : fail(res, 404, 'Not configured', 'not_found');
@@ -917,12 +1005,17 @@ async function route(req, res) {
     return send(res, 200, out);
   }
   if (p === '/api/stream' && m === 'GET') {
+    /* Staff screens and drivers are counted apart, so drivers can never use up the room staff screens need. Staff are limited
+       per person (a booth computer, the office and a phone each hold one), not per address: a whole office or a set of
+       booths often shares one internet address. Driver pages no longer open a live connection; older copies of the page
+       still might, so they get a small allowance. */
     const ip = clientIp(req);
-    if (clients.size >= 500 || (perIp.get(ip) || 0) >= 8) return fail(res, 429, 'Too many live connections', 'rate_limited');
+    if (staff) { let mine = 0, all = 0; for (const x of clients) if (x.uid) { all++; if (x.uid === staff.id) mine++; } if (all >= 2000 || mine >= 25) return fail(res, 429, 'Too many live connections', 'rate_limited'); }
+    else { let pub = 0; for (const x of clients) if (!x.uid) pub++; if (pub >= 200 || (perIp.get(ip) || 0) >= 4) return fail(res, 429, 'Too many live connections', 'rate_limited'); }
     res.writeHead(200, headers({ 'Content-Type': 'text/event-stream', Connection: 'keep-alive', 'X-Accel-Buffering': 'no' }));
     res.write('retry: 5000\n\n');
-    const c = { res, role, token: cookie(req, 'po_staff'), ip, uid: staff ? staff.id : null }; clients.add(c); perIp.set(ip, (perIp.get(ip) || 0) + 1);
-    req.on('close', () => { clients.delete(c); const n = (perIp.get(ip) || 1) - 1; if (n > 0) perIp.set(ip, n); else perIp.delete(ip); });
+    const c = { res, role, token: cookie(req, 'po_staff'), ip, uid: staff ? staff.id : null }; clients.add(c); if (!staff) perIp.set(ip, (perIp.get(ip) || 0) + 1);
+    req.on('close', () => { clients.delete(c); if (staff) return; const n = (perIp.get(ip) || 1) - 1; if (n > 0) perIp.set(ip, n); else perIp.delete(ip); });
     return;
   }
 
@@ -961,6 +1054,34 @@ async function route(req, res) {
       if (e.code === 'AUTH') alertOnce('scan-auth', 12, 'Plate scanning key problem', 'Plate Recognizer refused ParkOps’s key, or the plan is used up. Check the PLATE_RECOGNIZER_TOKEN value in Render and your Plate Recognizer plan. Officers can still type plates.');
       return fail(res, e.code === 'THROTTLED' || e.code === 'BUSY' ? 429 : e.code === 'AUTH' || e.code === 'OFF' ? 503 : 502, e.message, e.code === 'THROTTLED' || e.code === 'BUSY' ? 'rate_limited' : 'scan_failed', { retryAfterMs: e.retryAfterMs || 0 });
     }
+  }
+
+  /* ----- patrol log: every plate an officer checks is saved with what the check found ----- */
+  if (p === '/api/enforcement/check' && m === 'POST') {
+    if (!can(staff, 'citations')) return fail(res, 403, 'Sign in as staff who can issue notices.', 'forbidden');
+    if (limited(req, 'checks', 300)) return fail(res, 429, 'Too many checks a minute.', 'rate_limited');
+    let b; try { b = await readJson(req); } catch (e) { return fail(res, 400, 'Body must be a JSON object'); }
+    const plate = Rules.normPlate(b.plate || ''), f = S.facilities.find(x => x.id === b.facilityId);
+    if (plate.length < 2 || !f) return fail(res, 400, 'Send a plate and a location.');
+    const zone = b.zone === 'reserved' ? 'reserved' : 'general', r = R.checkPlate(plate, f.id, zone), k = R.checkKind(r);
+    const source = ['typed', 'scanner', 'list'].includes(b.source) ? b.source : 'typed', score = +b.score > 0 && +b.score <= 1 ? Math.round(+b.score * 100) / 100 : undefined;
+    const id = store.addCheck({ at: Date.now(), facilityId: f.id, plate, staffId: staff.id, officer: staff.name, source, level: r.level, violator: k.violator, kind: k.kind, title: r.title, suggest: r.suggest, detail: { lines: (r.lines || []).slice(0, 4), zone: zone === 'reserved' ? zone : undefined, score } });
+    return send(res, 200, { id, plate, level: r.level, title: r.title, violator: k.violator, kind: k.kind });
+  }
+  if ((p === '/api/enforcement/patrol' || p === '/api/enforcement/patrol.csv') && m === 'GET') {
+    if (!can(staff, 'citations') && !can(staff, 'reports')) return fail(res, 403, 'Sign in as staff who can see notices or reports.', 'forbidden');
+    const today = orgDay();
+    let from = calDay(query.from) ? query.from : today, to = calDay(query.to) ? query.to : from; if (to < from) [from, to] = [to, from];
+    if ((Date.parse(to + 'T00:00:00Z') - Date.parse(from + 'T00:00:00Z')) / D > 366) return fail(res, 400, 'Pick a range of a year or less.');
+    const fid = /^[\w-]{1,60}$/.test(String(query.facility || '')) ? String(query.facility) : '';
+    const rep = patrolReport(from, to, fid);
+    if (p === '/api/enforcement/patrol') { if (query.summary) { delete rep.vehicles; delete rep.truncated; } return send(res, 200, rep); }
+    const q = v => { v = String(v ?? ''); if (/^[=+\-@]/.test(v)) v = "'" + v; return /[",\n]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v; };
+    const tz = cfg().timeZone || 'America/Chicago', hm = t => t ? new Date(t).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', timeZone: tz }) : '';
+    const RES = { violator: 'Violator', flagged: 'Flagged, no notice', ok: 'Not violating' };
+    const lines = [['Date', 'Location', 'Plate', 'Result', 'Reason', 'Notice', 'Fine', 'Notice status', 'First checked', 'Last checked', 'Times checked', 'Officer'].join(',')]
+      .concat(rep.vehicles.map(v => { const c = v.notices[0] || {}; return [v.date, v.facilityName, v.plate, RES[v.result], v.label, v.notices.map(n => n.number).join(' '), v.notices.length ? v.notices.reduce((a, n) => a + (n.status === 'voided' ? 0 : n.fine), 0).toFixed(2) : '', c.status || '', hm(v.first), hm(v.last), v.checks, v.officers.join('; ')].map(q).join(','); }));
+    return send(res, 200, lines.join('\n') + '\n', { 'Content-Type': 'text/csv', 'Content-Disposition': `attachment; filename="patrol-${from}${to !== from ? '-to-' + to : ''}.csv"` });
   }
 
   /* ----- staff data ----- */
@@ -1075,7 +1196,7 @@ async function route(req, res) {
   if (p.startsWith('/api/admin/')) {
     if (!staff) return fail(res, 403, 'Sign in as staff.', 'forbidden');
     /* Which permission each admin endpoint needs. The ticket audit trail is open to anyone who works tickets. */
-    const ADMIN_PERM = { users: 'users', invite: 'users', audit: query.coll === 'sessions' && query.id ? 'tickets' : 'reports', history: can(staff, 'tickets') ? 'tickets' : 'reports', 'history.csv': 'export', activity: 'reports', 'activity.csv': 'export', 'payments.csv': 'export', storage: 'settings', scan: 'reports', outbox: 'settings', hotlist: 'enforcement', payments: 'payments', refund: 'refunds', backup: 'settings', 'collections.csv': 'export', approveMonthly: 'monthly', billing: 'monthly', invoices: 'monthly', companies: 'settings', monthly: 'import' };
+    const ADMIN_PERM = { users: 'users', invite: 'users', audit: query.coll === 'sessions' && query.id ? 'tickets' : 'reports', history: can(staff, 'tickets') ? 'tickets' : 'reports', 'history.csv': 'export', activity: 'reports', 'activity.csv': 'export', 'payments.csv': 'export', storage: 'settings', connection: 'settings', scan: 'reports', outbox: 'settings', hotlist: 'enforcement', payments: 'payments', refund: 'refunds', backup: 'settings', 'collections.csv': 'export', approveMonthly: 'monthly', billing: 'monthly', invoices: 'monthly', companies: 'settings', monthly: 'import' };
     const seg = p.slice(11).split('/')[0], needP = ADMIN_PERM[seg];
     if (!needP || !can(staff, needP)) return fail(res, 403, needP ? `${roleName(staff)}s can’t do that. It needs the ${needP} permission (${ROLE_LIST.filter(r => Rules.can(r, needP)).map(r => Rules.ROLE_NAMES[r]).join(', ')}).` : 'Not found', needP ? 'forbidden' : 'not_found');
     const actor = actorOf(staff);
@@ -1113,6 +1234,12 @@ async function route(req, res) {
       if (typeof b.active === 'boolean') { store.run('UPDATE users SET active=? WHERE id=?', b.active ? 1 : 0, u.id); if (!b.active) { auth.endAll('staff', u.id); dropClientsOf(u.id); } }
       if (b.password) { store.run('UPDATE users SET pw=?, failed=0, locked_until=NULL, reset_hash=NULL, reset_expires=NULL WHERE id=?', await Auth.hashPw(b.password), u.id); auth.endAll('staff', u.id); }
       store.audit(actor, 'user_update', 'users', u.id, { role, active: b.active, password: b.password ? 'reset' : undefined }); return send(res, 200, { ok: true });
+    }
+    /* Which address the server takes for this browser, for the per-address limits. Behind Cloudflare the visitor's own address
+       is in cf-connecting-ip; if the server is using a different one, every visitor would share Cloudflare's address. */
+    if (p === '/api/admin/connection' && m === 'GET') {
+      const seenAs = clientIp(req), cf = req.headers['cf-connecting-ip'] ? String(req.headers['cf-connecting-ip']) : null;
+      return send(res, 200, { seenAs, cloudflare: cf, forwardedFor: String(req.headers['x-forwarded-for'] || ''), socket: req.socket.remoteAddress || '', trustProxy: TRUST_PROXY, header: CLIENT_IP_HEADER || null, ok: !cf || cf === seenAs });
     }
     if (p === '/api/admin/audit' && m === 'GET') {
       const lim = Math.max(1, Math.min(5000, +query.limit || 200)), w = [], v = [];
@@ -1528,17 +1655,20 @@ async function route(req, res) {
   }
 
   /* ----- driver portal ----- */
+  /* Driver limits are per plate (or link) on top of a high ceiling per address: many phones share one address on venue
+     Wi-Fi and on phone carriers, so a per-address limit alone turns away a crowd on a busy night. */
+  const plateKey = x => Rules.normPlate(x || '').slice(0, 12) || '-';
   if (p === '/api/portal/lookup' && m === 'GET') {
-    if (limited(req, 'lookup', 30)) return fail(res, 429, 'Too many lookups. Wait a minute.', 'rate_limited');
+    if (limited(req, 'lookupIp', 600) || limited(req, 'lookup', 30, plateKey(query.plate))) return fail(res, 429, 'Too many lookups. Wait a minute.', 'rate_limited');
     return send(res, 200, R.lookup(query.plate) || {});
   }
   if (p === '/api/portal/extend' && m === 'GET') {
-    if (limited(req, 'lookup', 30)) return fail(res, 429, 'Too many lookups. Wait a minute.', 'rate_limited');
+    if (limited(req, 'lookupIp', 600) || limited(req, 'extend', 30, String(query.token || '').slice(0, 40))) return fail(res, 429, 'Too many lookups. Wait a minute.', 'rate_limited');
     const s = R.sessionByToken(String(query.token || '')); if (!s) return fail(res, 404, 'That link has expired. Start a new payment instead.', 'not_found');
     return send(res, 200, { plate: s.plate, facilityId: s.facilityId, paidUntil: s.paidUntil || null, phone: s.phone ? '•••' + String(s.phone).slice(-4) : null });
   }
   if (p === '/api/portal/quote' && m === 'GET') {
-    if (limited(req, 'quote', 120)) return fail(res, 429, 'Too many requests. Wait a minute.', 'rate_limited');
+    if (limited(req, 'quoteIp', 3000) || limited(req, 'quote', 120, plateKey(query.plate))) return fail(res, 429, 'Too many requests. Wait a minute.', 'rate_limited');
     const f = S.facilities.find(x => x.id === query.facilityId); if (!f) return fail(res, 400, 'Choose where you are parked.');
     const base = R.quote(f.id, Math.min(72, Math.max(0, +query.hours || 0)), query.untilEndOfDay === '1', query.plate || '');
     const live = query.plate ? R.liveForPlate(Rules.normPlate(query.plate), f.id) : null, from = live && live.paidUntil > Date.now() ? live.paidUntil : Date.now();
@@ -1556,14 +1686,18 @@ async function route(req, res) {
     const op = pm[1];
     if (!PUBLIC_OPS.includes(op) && !ACCOUNT_OPS.includes(op)) return fail(res, 404, 'Unknown action');
     if (ACCOUNT_OPS.includes(op) && !acct) return fail(res, 401, 'Sign in to your account first.', 'unauthenticated');
-    if (limited(req, 'portal', 20)) return fail(res, 429, 'Too many requests. Wait a minute.', 'rate_limited');
+    if (limited(req, 'portalIp', 300)) return fail(res, 429, 'Too many requests. Wait a minute.', 'rate_limited');
     let b; try { b = await readJson(req); } catch (e) { return fail(res, 400, 'Body must be JSON'); }
     const args = Object.assign({}, b.args || {});
+    const who = args.plate ? plateKey(args.plate) : String(args.citationId || args.sessionId || args.permitId || args.code || args.reservationId || '-').slice(0, 40);
+    if (limited(req, 'portal', 12, op + ':' + who)) return fail(res, 429, 'Too many requests. Wait a minute.', 'rate_limited');
+    const card = !!(b.payment && (b.payment.sourceId || b.payment.savedCard));
+    if (card && cardBlocked(req)) return fail(res, 429, 'Too many cards were declined from this network. Try again in 15 minutes, use your phone’s data instead of Wi-Fi, or pay at the booth.', 'rate_limited');
     delete args.accountId; delete args.companyId; delete args.companyName; delete args.source;
     if (acct) { args.accountId = acct.id; if (['reserve', 'monthlySignup'].includes(op)) { args.name = args.name || acct.name; args.email = acct.email; } }
     if (op === 'monthlySignup' && !acct.sq_card) return send(res, 200, { error: 'Add a card to your account first. Monthly parking is billed to it on the 1st.' });
     if (op === 'monthlySignup') b.payment = { savedCard: true, idempotencyKey: b.payment && b.payment.idempotencyKey };
-    try { return send(res, 200, await runPortal(op, args, b.payment, acct, b.expectedAmount)); }
+    try { const out = await runPortal(op, args, b.payment, acct, b.expectedAmount); const declined = !!(out && out.error && out.code === 'payment_failed'); if (card && out && (declined || (out.receipt && !out.error))) cardTried(req, declined); return send(res, 200, out); }
     catch (e) { return fail(res, e.status || 500, e.message, 'unavailable'); }
   }
   return fail(res, 404, 'Not found', 'not_found');
@@ -1574,7 +1708,7 @@ async function bootstrap() {
   await store.init();
   auth = Auth(store); photos = Photos(store, store.dir);
   const rows = await store.loadAll();
-  rows.forEach(r => applyDoc(r.coll, r.id, r.data));
+  rows.forEach(r => applyDoc(r.coll, r.id, r.data)); rebuildPlateIndex();
   FEED = await store.recentReads(100);
   if (!store.get('SELECT id FROM users LIMIT 1')) {
     const email = (process.env.ADMIN_EMAIL || '').trim().toLowerCase(), pw = process.env.ADMIN_PASSWORD || '';

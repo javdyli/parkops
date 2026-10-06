@@ -66,7 +66,9 @@ window.PARKOPS_HOSTED = (function () {
       const st = await api('GET', '/api/state');
       role = st.role; webhookBase = st.webhookBase; config = st.config; feed = st.feed || []; payments = st.payments; account = st.account; user = st.user; sms = st.sms || null; terminal = st.terminal || null; email = !!st.email; screenSince = st.screenSince || null; scan = st.scan || null;
       COLLS.forEach(c => (st[c] || []).forEach(d => data[c].set(d.id, strip(d))));
-      stream();
+      /* Only staff screens take live updates. A driver's page has what it needs from this first load, and thousands of
+         drivers holding a connection open on a busy night would only take room from the exit desks. */
+      if (user) stream(); else { const lv = document.querySelector('#live'); if (lv) lv.hidden = true; }
       /* Which console views a role gets: owners, managers and attendants work tickets and enforcement; accountants and
          viewers see the operations console read-only (the server refuses their writes). The public gets the driver portal. */
       const roles = role === 'public' ? ['portal'] : role === 'attendant' ? ['ops', 'enf', 'portal'] : role === 'viewer' || role === 'accountant' ? ['ops', 'portal'] : ['ops', 'enf', 'portal'];

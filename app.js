@@ -30,7 +30,7 @@ const TIMEZONES=[['America/New_York','Eastern'],['America/Chicago','Central'],['
 /* ============ state ============ */
 const S={roles:null,role:'viewer',perms:new Set(),facilities:[],permitTypes:[],permits:[],sessions:[],citations:[],validations:[],members:[],tenants:[],cameras:[],reservations:[],companies:[],invoices:[],vips:[],ratings:[],config:null,feed:[],loaded:new Set(),db:null,online:null,writable:true};
 const R=ParkRules(S);
-const UI={role:store.get('role')||'ops',tab:store.get('tab')||'overview',permitQ:'',permitStatus:'all',citeStatus:'open',citeQ:'',check:null,enfFac:store.get('enfFac')||'',actFac:store.get('actFac')||'',auditRange:'today',auditFilter:'all',tenant:store.get('tenant')||'',tenantDay:0,lookup:'',lookupData:null,appealFor:null,receipt:null,lprResult:null};
+const UI={role:store.get('role')||'ops',tab:store.get('tab')||'overview',permitQ:'',permitStatus:'all',citeStatus:'open',citeQ:'',check:null,enfFac:store.get('enfFac')||'',enfView:store.get('enfView')||'check',citeView:store.get('citeView')||'list',actFac:store.get('actFac')||'',auditRange:'today',auditFilter:'all',tenant:store.get('tenant')||'',tenantDay:0,lookup:'',lookupData:null,appealFor:null,receipt:null,lprResult:null};
 const COLLS=['facilities','permitTypes','permits','sessions','citations','validations','members','tenants','cameras','reservations','companies','invoices','vips','ratings'];
 const facById=id=>S.facilities.find(f=>f.id===id);
 const typeById=id=>S.permitTypes.find(t=>t.id===id);
@@ -676,11 +676,14 @@ function permitForm(p){
 /* ============ citations ============ */
 const citePill=c=>`<span class="pill ${({open:'bad',paid:'ok',appeal:'warn',voided:''})[c.status]||''}">${({open:'Open',paid:'Paid',appeal:'Under appeal',voided:'Voided'})[c.status]||c.status}</span>`;
 function vCitations(){
+  const logOn=HOSTED&&window.vPatrol;if(!logOn)UI.citeView='list';
+  const viewSeg=logOn?`<div class="seg" role="group" aria-label="Notices view"><button data-act="citeView" data-v="list" aria-pressed="${UI.citeView!=='patrol'}">Notices</button><button data-act="citeView" data-v="patrol" aria-pressed="${UI.citeView==='patrol'}">Patrol log</button></div>`:'';
+  if(UI.citeView==='patrol')return `<div class="pagehead"><div><h1>Patrol log</h1><p>Every plate officers checked, by day and location: who was violating, who wasn’t, and the notices written.</p></div><div class="row">${viewSeg}<button class="btn pri" data-role-go="enf">Check plates</button></div></div><div style="display:grid;gap:14px">${window.vPatrol()}</div>`;
   const qp=normPlate(UI.citeQ);
   const rows=S.citations.filter(c=>(UI.citeStatus==='all'||c.status===UI.citeStatus)&&(!qp||normPlate(c.plate).includes(qp)||String(c.number).includes(qp))).sort((a,b)=>b.issuedAt-a.issuedAt);
   const stBtn=(k,l)=>`<button data-act="citeStatus" data-v="${k}" aria-pressed="${UI.citeStatus===k}">${l} <span class="muted">${k==='all'?S.citations.length:S.citations.filter(c=>c.status===k).length}</span></button>`;
   const repeat={};S.citations.filter(c=>c.status==='open').forEach(c=>{const p=normPlate(c.plate);repeat[p]=(repeat[p]||0)+1});
-  return `<div class="pagehead"><div><h1>Parking charge notices</h1><p>Notices left on windshields for unpaid or improper parking, with payments and disputes. Plates with 3 or more open notices are flagged for boot or tow.</p></div><button class="btn pri" data-role-go="enf">Issue a notice</button></div>
+  return `<div class="pagehead"><div><h1>Parking charge notices</h1><p>Notices left on windshields for unpaid or improper parking, with payments and disputes. Plates with 3 or more open notices are flagged for boot or tow.</p></div><div class="row">${viewSeg}<button class="btn pri" data-role-go="enf">Issue a notice</button></div></div>
   <section class="panel"><div class="panel-h"><div class="filters" style="margin-right:auto"><div class="seg">${stBtn('open','Open')}${stBtn('appeal','Disputes')}${stBtn('paid','Paid')}${stBtn('voided','Voided')}${stBtn('all','All')}</div><input id="citeQ" type="search" placeholder="Plate or notice #" value="${esc(UI.citeQ)}" data-fresh="1"></div></div>
   ${rows.length?`<div class="tbl-wrap"><table><thead><tr><th>Notice</th><th>Plate</th><th>Location</th><th>Reason</th><th class="r">Amount</th><th>Issued</th><th>Status</th><th></th></tr></thead><tbody>${rows.map(c=>{const f=facById(c.facilityId);const rep=repeat[normPlate(c.plate)]>=3;
     return `<tr><td class="mono">${esc(c.number)}<span class="sub">${esc(c.officer||'')}</span></td><td>${plateChip(c.plate)} ${rep?'<span class="pill bad">Tow eligible</span>':''}</td><td>${esc(f?f.name:'—')}</td><td>${esc(c.violationName||c.violation)}${c.notes?`<span class="sub">${esc(c.notes)}</span>`:''}${c.status==='appeal'&&c.appeal?`<span class="sub"><b>Appeal:</b> “${esc(c.appeal.reason)}”</span>`:''}${c.appeal&&c.appeal.decision?`<span class="sub">Appeal ${esc(c.appeal.decision)}</span>`:''}</td><td class="r num">${money(c.fine)}</td><td class="num">${fmtTime(c.issuedAt,tzF(facById(c.facilityId)))}</td><td>${citePill(c)}</td>
@@ -698,8 +701,8 @@ function vLpr(){
   ${HOSTED?'':`<div class="callout warn"><b>Live camera connection runs on the hosted version.</b> This page can’t receive camera traffic directly. Deploy the ParkOps server from the download, then point each camera at its lane URL. Until then, use test reads or import a CSV export from your cameras.</div>`}
   <section class="panel"><div class="panel-h"><h2>Lane cameras</h2><span class="muted" style="font-size:.84rem">Lanes with no read in 2 hours are flagged</span></div>
   ${cams.length?`<div class="tbl-wrap"><table><thead><tr><th>Camera</th><th>Facility</th><th>Lane</th><th class="r">Reads today</th><th>Last read</th><th>Camera sends to</th><th></th></tr></thead><tbody>${cams.map(c=>{const f=facById(c.facilityId);const u=webhookUrl(c);
-    return `<tr><td><b>${esc(c.name)}</b><span class="sub">${esc(c.model||'')}</span></td><td>${esc(f?f.name:'—')}</td><td><span class="pill ${c.direction==='in'?'ok':'info'}">${c.direction==='in'?'Entry':'Exit'}</span></td><td class="r num">${reads(c)}</td><td class="num">${c.lastReadAt?ago(c.lastReadAt):'Never'} ${stale(c)?'<span class="pill warn">Quiet</span>':''}${c.lastPlate?`<span class="sub">${esc(c.lastPlate)}</span>`:''}</td>
-    <td>${u?`<div class="url"><code title="${esc(u)}">${esc(u)}</code><button class="btn sm" data-act="copy" data-v="${esc(u)}">Copy</button></div>`:'<span class="muted">Shown once hosted</span>'}</td><td><div class="acts"><button class="btn sm" data-act="editCamera" data-id="${c.id}">Edit</button></div></td></tr>`}).join('')}</tbody></table></div>`:'<div class="empty">No lane cameras yet. Add one camera per entry lane and one per exit lane.</div>'}</section>
+    return `<tr><td><b>${esc(c.name)}</b><span class="sub">${esc(/^https?:\/\//i.test(c.model||'')?'':c.model||'')}</span>${c.adminUrl||/^https?:\/\//i.test(c.model||'')?`<a class="sub" href="${esc(c.adminUrl||c.model)}" target="_blank" rel="noopener">Camera page ↗</a>`:''}</td><td>${esc(f?f.name:'—')}</td><td><span class="pill ${c.direction==='in'?'ok':'info'}">${c.direction==='in'?'Entry':'Exit'}</span></td><td class="r num">${reads(c)}</td><td class="num">${c.lastReadAt?ago(c.lastReadAt):c.lastEventAt?'<span class="pill warn">No plate in messages</span>':'<span class="pill">Waiting for first read</span>'} ${c.lastReadAt&&stale(c)?'<span class="pill warn">Quiet</span>':''}${c.lastPlate?`<span class="sub">${esc(c.lastPlate)}</span>`:''}</td>
+    <td>${u?`<div class="url"><code title="${esc(u)}">${esc(u)}</code><button class="btn sm" data-act="copy" data-v="${esc(u)}">Copy</button></div>`:'<span class="muted">Shown once hosted</span>'}</td><td><div class="acts"><button class="btn sm ${c.lastReadAt?'':'pri'}" data-act="cameraConnect" data-id="${c.id}">Connect</button><button class="btn sm" data-act="editCamera" data-id="${c.id}">Edit</button></div></td></tr>`}).join('')}</tbody></table></div>`:'<div class="empty">No lane cameras yet. Add one camera per entry lane and one per exit lane.</div>'}</section>
   <div class="grid g2e">
   <section class="panel"><div class="panel-h"><h2>Send a test read</h2></div><form class="panel-b" data-form="lprRead" style="display:grid;gap:12px">
     <div class="form-grid"><div class="field span"><label for="lCam">Lane camera</label><select id="lCam">${cams.map(c=>`<option value="${c.id}">${esc((facById(c.facilityId)||{}).name||'')} · ${esc(c.name)} (${c.direction==='in'?'entry':'exit'})</option>`).join('')||'<option value="">Add a lane camera first</option>'}</select></div>
@@ -716,16 +719,49 @@ function cameraForm(c){
   c=c||{};
   if(!S.facilities.length){toast('Add a facility first.',true);return}
   openForm({title:c.id?'Edit '+c.name:'Add lane camera',submit:c.id?'Save changes':'Add camera',fields:[
-    {id:'name',label:'Camera name',value:c.name,required:true,help:'e.g. “North Garage Entry 1”'},
+    {id:'name',label:'Camera name',value:c.name,required:true,help:'e.g. “Garage 4 Exit 1”'},
     {id:'facilityId',label:'Facility',type:'select',options:S.facilities.map(f=>[f.id,f.name]),value:c.facilityId},
-    {id:'direction',label:'Lane',type:'select',options:[['in','Entry lane'],['out','Exit lane']],value:c.direction||'in'},
-    {id:'model',label:'Camera model',value:c.model||'',help:'For your records, e.g. Hikvision iDS-TCM403 or Axis P1465-LE-3'},
+    {id:'direction',label:'Lane',type:'select',options:[['in','Entry lane'],['out','Exit lane']],value:c.direction||'in',help:'Which way the cars this camera reads are going. A swapped lane records entries as exits.'},
+    {id:'model',label:'Camera model',value:/^https?:\/\//i.test(c.model||'')?'':c.model||'',help:'For your records, e.g. Hikvision iDS-TCM403 or Axis P1465-LE-3'},
+    {id:'adminUrl',label:'Camera’s own web page (optional)',value:c.adminUrl||(/^https?:\/\//i.test(c.model||'')?c.model:''),span:true,help:'The address you open to manage the camera, kept here as a link. ParkOps doesn’t connect to it: the camera sends its plate reads to ParkOps. After saving, Connect shows the address to put in the camera.'},
   ],extra:c.id?`<button type="button" class="btn danger" data-dlg="delete">Remove camera</button>`:'',
   onExtra:()=>write(db=>col(db,'cameras').doc(c.id).delete(),'Camera removed'),
-  onSubmit:v=>{const data={name:v.name.trim(),facilityId:v.facilityId,direction:v.direction,model:v.model.trim()};
+  onSubmit:v=>{let model=v.model.trim(),adminUrl=v.adminUrl.trim();
+    if(/^https?:\/\//i.test(model)&&!adminUrl){adminUrl=model;model=''}
+    if(adminUrl&&!/^https?:\/\//i.test(adminUrl))adminUrl='http://'+adminUrl;
+    const data={name:v.name.trim(),facilityId:v.facilityId,direction:v.direction,model,adminUrl};
     if(c.id)return write(db=>col(db,'cameras').doc(c.id).update(data),'Camera saved');
     data.token=Array.from(crypto.getRandomValues(new Uint8Array(12)),b=>b.toString(16).padStart(2,'0')).join('');data.createdAt=now();
-    return addDoc('cameras',data,R.uid('c')).then(ok=>{if(ok)toast('Camera added');return ok})}});
+    const id=R.uid('c');
+    return addDoc('cameras',data,id).then(ok=>{if(ok){toast('Camera added. Next: connect it.');setTimeout(()=>{const cam=byId('cameras',id);if(cam&&!dlg.open)cameraConnect(cam)},500)}return ok})}});
+}
+/* Connecting a lane camera. The camera sends each plate it reads to its lane address on this site; ParkOps never
+   reaches into the camera, which usually sits on a private network the internet can't see. This screen gives the
+   address, the steps, and what the camera last sent, so a setup problem can be seen from here. */
+function cameraConnect(c){
+  if(!c)return;
+  const u=webhookUrl(c),f=facById(c.facilityId),host=u?u.replace(/^https?:\/\/([^/]+).*$/,'$1'):location.host;
+  const lane=c.direction==='in'?'entry':'exit',hint=String(c.adminUrl||'')+' '+String(c.name||'');
+  const mismatch=(/exit/i.test(c.adminUrl||'')&&c.direction==='in')?'The camera’s web address says “exit”, but this lane is set as an entry.':(/entr/i.test(c.adminUrl||'')&&c.direction==='out')?'The camera’s web address says “entr…”, but this lane is set as an exit.':'';
+  void hint;
+  const status=c.lastReadAt?`<b>Connected.</b> Last plate read ${esc(ago(c.lastReadAt))}${c.lastPlate?` (${esc(c.lastPlate)})`:''}.`
+    :c.lastEventAt?`<b>The camera is reaching ParkOps, but its messages had no plate ParkOps could read</b> (last one ${esc(ago(c.lastEventAt))}${c.lastIgnored?`: ${esc(c.lastIgnored)}`:''}). Check step 2: the message must carry the plate, as JSON or as <span class="mono">?plate=</span> in the address.`
+    :'<b>Waiting for the first read.</b> Nothing has arrived from this camera yet.';
+  openForm({title:'Connect '+c.name,submit:'Done',body:`<div style="display:grid;gap:14px">
+    <div class="callout ${c.lastReadAt?'':'warn'}" style="margin:0">${status}</div>
+    ${mismatch?`<div class="callout warn" style="margin:0"><b>Check the lane.</b> ${esc(mismatch)} If this camera watches cars leaving, open Edit and set Lane to Exit lane, or every visit through it will be recorded backwards.</div>`:''}
+    <div class="field"><label for="laneUrl">This lane’s address (${esc(f?f.name:'')} · ${lane})</label><div class="row" style="gap:8px;flex-wrap:nowrap"><input id="laneUrl" readonly value="${esc(u||'Shown once hosted')}" class="mono" style="flex:1"><button type="button" class="btn" id="copyLane">Copy</button></div></div>
+    <ol style="margin:0;padding-left:20px;display:grid;gap:8px">
+      <li>Open the camera’s settings${c.adminUrl?` at <a href="${esc(c.adminUrl)}" target="_blank" rel="noopener">${esc(c.adminUrl)}</a>`:''}. That page is on your network, so open it from a computer there; ParkOps can’t open it for you.</li>
+      <li>In the camera’s plate-reading app, find where it sends events to a server (often called <i>HTTP push</i>, <i>event push</i>, <i>notification</i> or <i>HTTP recipient</i>). Add the address above. Use <b>POST</b> with <b>JSON</b> if offered. If the app can only call a web address, use the address followed by <span class="mono">?plate=</span> and the app’s plate placeholder.</li>
+      <li>Send only new cars (on Axis License Plate Verifier, ParkOps counts <span class="mono">carState: new</span> and ignores updates). Turn on the plate picture if the app offers it.</li>
+      <li>The camera must be able to reach <b>${esc(host)}</b> on the internet (HTTPS, port 443). If it sits on a company network, ask that network’s IT team to allow it.</li>
+      <li>Drive a car past or hold up a plate. This screen and the Cameras page then show the time and the plate. If nothing arrives within a minute, check step 4.</li>
+    </ol>
+    ${c.lastSample?`<details><summary class="muted" style="cursor:pointer">What the camera sent last (for troubleshooting)</summary><pre class="mono" style="white-space:pre-wrap;font-size:.75rem;max-height:220px;overflow:auto;background:var(--surface-2);padding:8px;border-radius:6px;margin:8px 0 0">${esc(c.lastSample)}</pre></details>`:''}
+  </div>`,onSubmit:()=>true});
+  const cp=$('#copyLane',dlgForm);if(cp)cp.onclick=async()=>{const el=$('#laneUrl',dlgForm);try{await navigator.clipboard.writeText(el.value);toast('Address copied')}catch(e){el.select();document.execCommand('copy');toast('Address copied')}};
+  const li=$('#laneUrl',dlgForm);if(li)li.onfocus=()=>li.select();
 }
 /* ---------- camera export import (Axis License Plate Verifier and other CSVs) ----------
    Reads the file in the browser, guesses which column holds the plate, the camera and the time, and shows a preview
@@ -883,7 +919,12 @@ function vEnforcement(){
   const officer=store.get('officer')||'';
   const sweep=R.onSiteSessions(f).filter(s=>s.kind!=='permit'&&!s.noPlate).map(s=>({s,r:R.checkPlate(s.plate,f.id)})).sort((a,b)=>({bad:0,warn:1,ok:2}[a.r.level])-({bad:0,warn:1,ok:2}[b.r.level]));
   const mine=S.citations.filter(c=>c.facilityId===f.id&&now()-c.issuedAt<D).sort((a,b)=>b.issuedAt-a.issuedAt);
+  const logOn=HOSTED&&window.vPatrol;if(!logOn)UI.enfView='check';
+  const viewSeg=logOn?`<div class="seg" role="group" aria-label="Enforcement view" style="justify-self:start"><button data-act="enfView" data-v="check" aria-pressed="${UI.enfView!=='log'}">Check plates</button><button data-act="enfView" data-v="log" aria-pressed="${UI.enfView==='log'}">Patrol log</button></div>`:'';
+  if(UI.enfView==='log')return `<div class="enf wide">${viewSeg}${window.vPatrol()}</div>`;
+  const today=logOn&&window.patSummary?window.patSummary(f.id):null;
   return `<div class="enf">
+  ${viewSeg}
   ${HOSTED&&window.scanCard?window.scanCard():''}
   <section class="panel"><form class="panel-b" data-form="check" style="display:grid;gap:12px">
     <div class="row"><div class="field"><label for="enfFac">Patrolling</label><select id="enfFac" data-fresh="1">${S.facilities.map(x=>`<option value="${x.id}" ${x.id===UI.enfFac?'selected':''}>${esc(x.name)}</option>`).join('')}</select></div>
@@ -905,6 +946,7 @@ function vEnforcement(){
   ${lastC&&HOSTED&&window.printPanel?window.printPanel(lastC):lastC?`<section class="panel"><div class="panel-h"><h3>Notice ${esc(lastC.number)} issued</h3><span class="pill bad">${money(lastC.fine)}</span></div><div class="panel-b row"><button class="btn pri" data-act="doneCitePilot">Done · next plate</button><span class="note">Printing on a Zebra printer needs the hosted version.</span></div></section>`:''}
   <section class="panel"><div class="panel-h"><h3>Sweep: ${esc(f.name)}</h3><span class="muted" style="font-size:.84rem">Visitor vehicles on record, problems first</span></div>
     ${sweep.length?`<div class="list">${sweep.map(({s,r})=>`<div class="li"><span class="sev ${r.level}"></span>${plateChip(s.plate)}<div class="grow"><b>${esc(r.title)}</b><span class="muted" style="display:block;font-size:.82rem">${s.mode==='prepaid'?'Paid until '+fmtTime(s.paidUntil):'Entered '+fmtTime(s.startAt)}</span></div></div>`).join('')}</div>`:'<div class="empty">No visitor vehicles recorded here.</div>'}</section>
+  ${today?`<section class="panel"><div class="panel-h"><h3>Today at ${esc(f.name)}</h3><button class="btn sm" data-act="enfView" data-v="log">Patrol log</button></div><div class="panel-b row" style="gap:8px"><span class="pill">${today.checked} checked</span><span class="pill ${today.violators?'bad':''}">${today.violators} violator${today.violators===1?'':'s'}</span><span class="pill ok">${today.ok} not violating</span>${today.flagged?`<span class="pill warn">${today.flagged} flagged, no notice</span>`:''}</div></section>`:''}
   <section class="panel"><div class="panel-h"><h3>Notices here, last 24 hours</h3></div>
     ${mine.length?`<div class="list">${mine.map(c=>`<div class="li"><span class="sev bad"></span>${plateChip(c.plate)}<div class="grow"><b>${esc(c.violationName)}</b><span class="muted" style="display:block;font-size:.82rem">${esc(c.number)} · ${fmtTime(c.issuedAt,tzF(facById(c.facilityId)))} · ${esc(c.officer||'')}</span></div>${citePill(c)}</div>`).join('')}</div>`:'<div class="empty">None yet today.</div>'}</section>
   </div>`;
@@ -916,7 +958,7 @@ async function issueCitation({plate,facId,code,officer,notes,sessionId,plateStat
   const number='C'+Date.now().toString(36).toUpperCase().slice(-6);
   const id=R.uid('c');
   const ok=await addDoc('citations',{number,plate:pl,plateState:(plateState||'').toUpperCase().slice(0,2),facilityId:facId,violation:v.code,violationName:v.name,fine:+v.fine||0,officer:officer||'',notes:notes||'',issuedAt:now(),status:'open',sessionId:sessionId||null,photoIds:photoIds||[]},id);
-  if(ok){toast(`Notice ${number} issued to ${pl}`);UI.lastCite=id}return ok;
+  if(ok){toast(`Notice ${number} issued to ${pl}`);UI.lastCite=id;if(window.patReset)window.patReset()}return ok;
 }
 
 /* ============ driver portal ============ */
@@ -1016,11 +1058,12 @@ let toastT;function toast(msg,err){const t=$('#toast');t.textContent=msg;t.class
 /* ============ actions ============ */
 const VIEWS={overview:vOverview,activity:vActivity,tenants:vTenants,facilities:vFacilities,permits:vPermits,citations:vCitations,lpr:vLpr,settings:vSettings,reservations:()=>window.vReservations?window.vReservations():'',payments:()=>window.vPayments?window.vPayments():'',history:()=>window.vHistory?window.vHistory():'',daily:()=>window.vDaily?window.vDaily():'',selfparking:()=>window.vSelfParking?window.vSelfParking():'',review:()=>window.vReview?window.vReview():'',valet:()=>window.vValet?window.vValet():'',reports:()=>window.vReports?window.vReports():''};
 const ACT={
+  cameraConnect(b){cameraConnect(byId('cameras',b.dataset.id))},
   impRun(){runImport()},
   impCancel(){UI.imp=null;render()},
   goTab(b){UI.tab=b.dataset.tab;store.set('tab',UI.tab);const f=b.dataset.filter;if(f){if(UI.tab==='permits')UI.permitStatus=f==='pending'?'all':f;if(UI.tab==='citations')UI.citeStatus=f;if(UI.tab==='activity'){UI.auditFilter=f;UI.auditRange='week'}if(UI.tab==='selfparking'){UI.spView='tickets';UI.tkStatus=f;UI.tkRange='month'}}
     if(b.dataset.tenant){UI.tenant=b.dataset.tenant;UI.tenantDay=0}if(b.dataset.fac){UI.actFac=b.dataset.fac;store.set('actFac',UI.actFac)}render();window.scrollTo(0,0)},
-  permitStatus(b){UI.permitStatus=b.dataset.v;render()},enfZone(b){UI.enfZone=b.dataset.v;render()},citeStatus(b){UI.citeStatus=b.dataset.v;render()},auditFilter(b){UI.auditFilter=b.dataset.v;render()},
+  permitStatus(b){UI.permitStatus=b.dataset.v;render()},enfZone(b){UI.enfZone=b.dataset.v;render()},enfView(b){UI.enfView=b.dataset.v;store.set('enfView',UI.enfView);render();window.scrollTo(0,0)},citeView(b){UI.citeView=b.dataset.v;store.set('citeView',UI.citeView);render()},citeStatus(b){UI.citeStatus=b.dataset.v;render()},auditFilter(b){UI.auditFilter=b.dataset.v;render()},
   pickTenant(b,e){if(e.target.closest('[data-act=editTenant]'))return;UI.tenant=b.dataset.id;UI.tenantDay=0;store.set('tenant',UI.tenant);render()},
   tenantDay(b){UI.tenantDay=Math.max(0,Math.min(29,UI.tenantDay+(+b.dataset.v)));render()},
   tenantDayPick(b){UI.tenantDay=29-(+b.dataset.i);render()},
@@ -1080,7 +1123,7 @@ const ACT={
   citePaid(b){const c=byId('citations',b.dataset.id);write(db=>col(db,'citations').doc(c.id).update({status:'paid',paidAt:now(),paidVia:'office'}),`Citation ${c.number} marked paid`)},
   citeVoid(b){const c=byId('citations',b.dataset.id);confirmBox('Void citation',`Void citation ${esc(c.number)} for ${esc(c.plate)}?`,'Void citation',()=>write(db=>col(db,'citations').doc(c.id).update({status:'voided',voidedAt:now()}),'Citation voided'))},
   appealDecide(b){const c=byId('citations',b.dataset.id);const d=b.dataset.v;write(db=>col(db,'citations').doc(c.id).update({status:d==='approved'?'voided':'open',appeal:Object.assign({},c.appeal,{decision:d,decidedAt:now()})}),d==='approved'?'Appeal approved, citation voided':'Appeal denied, citation reopened')},
-  async checkPlate(b){const pl=b.dataset.plate;if(UI.role==='portal'){UI.lookup=pl;await refreshLookup();render();return}if(UI.role==='ops'){UI.tab='selfparking';UI.spView='vehicle';UI.vehicle=pl;store.set('tab',UI.tab);render();window.scrollTo(0,0);return}if(!S.roles.includes('enf'))return;UI.role='enf';store.set('role','enf');const cur=S.sessions.find(s=>normPlate(s.plate)===pl&&R.isLive(s));if(cur)UI.enfFac=cur.facilityId;UI.check={plate:pl,facId:UI.enfFac};render();window.scrollTo(0,0)},
+  async checkPlate(b){const pl=b.dataset.plate;if(UI.role==='portal'){UI.lookup=pl;await refreshLookup();render();return}if(UI.role==='ops'){UI.tab='selfparking';UI.spView='vehicle';UI.vehicle=pl;store.set('tab',UI.tab);render();window.scrollTo(0,0);return}if(!S.roles.includes('enf'))return;UI.role='enf';store.set('role','enf');UI.enfView='check';const cur=S.sessions.find(s=>normPlate(s.plate)===pl&&R.isLive(s));if(cur)UI.enfFac=cur.facilityId;UI.check={plate:pl,facId:UI.enfFac};render();window.scrollTo(0,0)},
   addViolation(){const v=[...violations(),{code:'NEW',name:'New violation',fine:0}];write(db=>db.doc('settings/config').set(Object.assign({},S.config||{},{violations:v})))},
   /* Demo helper: sample records keep their shape but every time on them moves forward so the latest sample activity is "now". */
   refreshSamples(){
@@ -1106,7 +1149,7 @@ const ACT={
 };
 const FORMS={
   async lprRead(){const cam=$('#lCam').value;if(!cam){toast('Add a lane camera first.',true);return}const r=await lprRead({plate:$('#lPlate').value,cameraId:cam});UI.lprResult=r;$('#lPlate').value='';render()},
-  check(){const pl=normPlate($('#enfPlate').value);if(!pl){toast('Enter a plate to check.',true);return}UI.check={plate:pl,facId:UI.enfFac};UI.lastCite=null;$('#enfPlate').value='';render()},
+  check(){const pl=normPlate($('#enfPlate').value);if(!pl){toast('Enter a plate to check.',true);return}UI.check={plate:pl,facId:UI.enfFac};UI.lastCite=null;$('#enfPlate').value='';render();if(window.recordCheck)window.recordCheck(pl,UI.enfFac,'typed')},
   async cite(){const officer=$('#citeOfficer').value.trim();store.set('officer',officer);
     let photoIds=[];if(HOSTED&&window.citePhotoIds)photoIds=window.citePhotoIds(UI.check.plate,UI.check.facId);
     const ok=await issueCitation({plate:UI.check.plate,facId:UI.check.facId,code:$('#citeViol').value,officer,notes:$('#citeNotes').value.trim(),plateState:($('#citeState')||{}).value,photoIds});

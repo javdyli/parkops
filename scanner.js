@@ -238,8 +238,10 @@
     if (!it || t - it.at > TUNE.sameCarMs) {
       it = { id: ++SC.seq, key, plate: pl, facId, at: t, n: 1, score: r.score, state: r.state, manual: !!r.manual, alts: r.alts || [], level: v.level }; beep = true;
       SC.items.unshift(it); SC.byKey.set(key, it); SC.counts.checked++; if (v.level !== 'ok') SC.counts.flagged++;
+      log(it, r, v);
     } else {
       it.n++; const worse = rank(v.level) > rank(it.level) || (v.level !== it.level && it.dismissed); it.at = t;
+      if (v.level !== it.level && !it.cited) log(it, r, v);
       if (r.score > it.score) { it.score = r.score; it.state = r.state || it.state; it.alts = r.alts || it.alts; }
       if (worse && !it.cited) { beep = true; it.dismissed = false; if (it.level === 'ok') SC.counts.flagged++; }
       it.level = it.cited ? it.level : v.level;
@@ -251,6 +253,13 @@
     SC.cur = it; SC.curFresh = true;
     const view = $('#scView'); if (view) { view.dataset.hit = v.level; clearTimeout(SC.hitT); SC.hitT = setTimeout(() => { const vv = $('#scView'); if (vv) vv.dataset.hit = ''; }, 1600); }
     return { level: v.level, beep };
+  }
+  /* The patrol log keeps every vehicle checked. A doubtful read that looks like a violation waits until the officer acts
+     on it (issues a notice, or picks another plate), so misreads don't fill the log with violators that never were. */
+  function log(it, r, v) {
+    if (!window.recordCheck) return;
+    if (v.level !== 'ok' && !r.manual && r.score < TUNE.lowScore) { it.unlogged = true; return; }
+    it.unlogged = false; window.recordCheck(it.plate, it.facId, r.manual ? 'typed' : 'scanner', r.manual ? {} : { score: r.score });
   }
   function dropFrame(it) { if (it.thumb) { try { URL.revokeObjectURL(it.thumb); } catch (e) {} } it.thumb = null; it.frame = null; }
   function trimFrames() { const withF = SC.items.filter(x => x.frame); for (let i = TUNE.keepFrames; i < withF.length; i++) dropFrame(withF[i]); }
@@ -448,7 +457,7 @@
     else if (a === 'notice' && it) noticeForm(it);
     else if (a === 'dismiss' && it) { it.dismissed = true; if (SC.cur === it) SC.cur = SC.items.find(x => !x.dismissed && x !== it) || null; renderAll(); }
     else if (a === 'print' && it) { const c = byId('citations', it.citeId); b.disabled = true; await printCite(it, c); renderAll(); }
-    else if (a === 'use' && it) { const pl = normPlate(b.dataset.plate); if (pl) { SC.byKey.delete(it.key); const v = verdictOf(pl, it.facId); Object.assign(it, { plate: pl, key: it.facId + '|' + pl, alts: [], score: 1, level: v.level, title: v.title, lines: v.lines || [], suggest: v.suggest, towEligible: !!v.towEligible, hot: !!v.hot }); SC.byKey.set(it.key, it); SC.cur = it; alertFor(v.level); renderAll(); } }
+    else if (a === 'use' && it) { const pl = normPlate(b.dataset.plate); if (pl) { SC.byKey.delete(it.key); const v = verdictOf(pl, it.facId); Object.assign(it, { plate: pl, key: it.facId + '|' + pl, alts: [], score: 1, level: v.level, title: v.title, lines: v.lines || [], suggest: v.suggest, towEligible: !!v.towEligible, hot: !!v.hot }); SC.byKey.set(it.key, it); SC.cur = it; log(it, { manual: true }, v); alertFor(v.level); renderAll(); } }
   });
   document.addEventListener('submit', e => {
     if (!e.target.closest('#scManual')) return; e.preventDefault();

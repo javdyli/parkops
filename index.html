@@ -171,6 +171,7 @@ input:focus,select:focus,textarea:focus{border-color:var(--accent);outline:none;
 
 /* enforcement */
 .enf{max-width:760px;width:100%;margin:0 auto;display:grid;gap:16px}
+.enf.wide{max-width:1100px}
 .plate-in{font-family:var(--f-display);font-size:2.2rem;font-weight:700;letter-spacing:.14em;text-transform:uppercase;text-align:center;background:var(--plate-bg);color:var(--plate-fg);border:3px solid var(--plate-line);border-radius:10px;padding:8px 12px}
 .plate-in::placeholder{color:#9aa6ba;letter-spacing:.08em}
 .verdict{border-radius:var(--r);padding:18px;display:grid;gap:6px;border:2px solid}
@@ -317,7 +318,10 @@ button,[data-act],select,summary,label{touch-action:manipulation}
 (function (root) {
   'use strict';
   const M = 6e4, H = 36e5, D = 864e5;
-  const normPlate = p => String(p || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+  /* Plates are compared thousands of times a second on a busy night (every lookup walks the day's tickets), so the cleaned-up
+     form of each plate string is remembered. */
+  const plateMemo = new Map();
+  const normPlate = p => { if (typeof p !== 'string') return String(p || '').toUpperCase().replace(/[^A-Z0-9]/g, ''); let v = plateMemo.get(p); if (v === undefined) { v = p.toUpperCase().replace(/[^A-Z0-9]/g, ''); if (plateMemo.size > 50000) plateMemo.clear(); plateMemo.set(p, v); } return v; };
   const CONF = { O: '0', Q: '0', D: '0', I: '1', L: '1', B: '8', S: '5', Z: '2', G: '6' };
   const canon = p => normPlate(p).replace(/[OQDILBSZG]/g, c => CONF[c]);
   const NOREAD = /^(|UNKNOWN|NOPLATE|NOREAD|NONE|0+)$/;
@@ -384,6 +388,10 @@ button,[data-act],select,summary,label{touch-action:manipulation}
     opts = opts || {};
     const cfg = () => S.config || {};
     const L = k => S[k] || [];
+    /* One plate's tickets. The server keeps an index by plate (S.__byPlate, for the list it was built from); without one,
+       every ticket is looked at. Either way the same tickets come back, oldest first. */
+    const byStart = (a, b) => (a.startAt || a.endAt || 0) - (b.startAt || b.endAt || 0);
+    const ofPlate = pl => { const ix = S.__byPlate; if (ix && S.__byPlateArr === S.sessions) return (ix.get(pl) || []).slice().sort(byStart); return L('sessions').filter(s => normPlate(s.plate) === pl).sort(byStart); };
     const fac = id => L('facilities').find(f => f.id === id);
     const ptype = id => L('permitTypes').find(t => t.id === id);
     const tenant = id => L('tenants').find(t => t.id === id);
@@ -519,6 +527,18 @@ button,[data-act],select,summary,label{touch-action:manipulation}
       return out;
     }
     const charge = (f, start, end, val) => priceDetail(f, start, end, val).amount;
+    /* A ticket's price: charge() for its stay, except that a car which already paid the flat event rate at the
+       entrance keeps that price even if it leaves inside the grace period. A car turned away without paying still
+       leaves free. */
+    function stayDetail(s, end, val) {
+      const f = facFor(s), pd = priceDetail(f, s.startAt, end, val);
+      if (pd.rule === 'grace' && !val && paidOf(s) > 0) {
+        const ev = eventAt(f, s.startAt);
+        if (ev && ev.flat) return Object.assign(pd, { amount: round2(+ev.price), rule: ev.name || 'event', special: { name: ev.name || 'event', price: +ev.price, flat: true } });
+      }
+      return pd;
+    }
+    const stayCharge = (s, end, val) => stayDetail(s, end, val).amount;
     function rateSummary(f) {
       const r = (f && f.rates) || {}, out = [], dn = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
       const t12 = x => { const m = hm(x), h = Math.floor(m / 60), mm = m % 60; return (h % 12 || 12) + (mm ? ':' + pad2(mm) : '') + (h < 12 ? 'am' : 'pm'); };
@@ -552,7 +572,7 @@ button,[data-act],select,summary,label{touch-action:manipulation}
       if (freeKind(s) || s.noEntry || s.noPlate) return 0;
       if (s.mode === 'prepaid' && !s.endAt) return paidOf(s);
       if (s.endAt && s.fee != null && !end) return +s.fee;
-      return charge(facFor(s), s.startAt, end || s.endAt || now(), s.validation);
+      return stayCharge(s, end || s.endAt || now(), s.validation);
     }
     const needsReview = s => !!(s.matchedBy && !s.matchConfirmed);
     /* What an open ticket can be paid at the entrance on an event night: the flat event price less anything already
@@ -568,7 +588,7 @@ button,[data-act],select,summary,label{touch-action:manipulation}
     /* Full bill for a ticket: parking breakdown, extras, late fee, payments, balance, tax. */
     function ticketBill(s, end) {
       const f = facFor(s), prepaidOpen = s.mode === 'prepaid' && !s.endAt && !end, at = end || s.endAt || (prepaidOpen ? Math.max(s.paidUntil || 0, s.startAt || 0) : now());
-      const pd = (freeKind(s) || s.noEntry || s.noPlate) ? { amount: 0, rule: s.kind === 'permit' ? 'monthly' : s.vipFree ? 'vip' : 'none', days: [], standard: 0, special: null, discount: 0, freeMinutes: 0 } : priceDetail(f, s.startAt, at, s.validation);
+      const pd = (freeKind(s) || s.noEntry || s.noPlate) ? { amount: 0, rule: s.kind === 'permit' ? 'monthly' : s.vipFree ? 'vip' : 'none', days: [], standard: 0, special: null, discount: 0, freeMinutes: 0 } : stayDetail(s, at, s.validation);
       const parking = s.endAt && s.fee != null && !end ? +s.fee : prepaidOpen ? paidOf(s) : pd.amount;
       const adjusted = s.endAt && s.fee != null && s.feeOriginal != null && Math.abs(+s.fee - +s.feeOriginal) > 0.004;
       const extras = extrasOf(s), late = +s.lateFee || 0, paid = paidOf(s);
@@ -617,7 +637,7 @@ button,[data-act],select,summary,label{touch-action:manipulation}
 
     /* ---------- collections ---------- */
     function plateDebt(pl) {
-      const owed = L('sessions').filter(s => normPlate(s.plate) === pl && s.endAt && balanceOf(s) > 0);
+      const owed = ofPlate(pl).filter(s => s.endAt && balanceOf(s) > 0);
       const cits = L('citations').filter(c => normPlate(c.plate) === pl && c.status === 'open');
       return { owed, cits, total: round2(sum(owed, balanceOf) + sum(cits, c => c.fine)), count: owed.length + cits.length };
     }
@@ -742,7 +762,7 @@ button,[data-act],select,summary,label{touch-action:manipulation}
           ops.push({ type: 'set', coll: 'sessions', id, data: Object.assign({ plate: 'NOREAD', noPlate: true, mode: 'lpr', kind: 'unknown', ticket: ticketNo(), startAt: at, endAt: null, payments: [] }, base) });
           res = { level: 'warn', text: 'Vehicle entered without a readable plate, counted as unknown', sessionId: id };
         } else {
-          const live = L('sessions').filter(s => s.facilityId === facilityId && !s.endAt && normPlate(s.plate) === pl).sort((a, b) => b.startAt - a.startAt)[0];
+          const live = ofPlate(pl).filter(s => s.facilityId === facilityId && !s.endAt).sort((a, b) => b.startAt - a.startAt)[0];
           if (live && live.mode === 'lpr' && at - live.startAt < 3 * M) {
             res = { level: 'info', text: 'Duplicate entry read ignored', sessionId: live.id, duplicate: true };
           } else {
@@ -785,14 +805,14 @@ button,[data-act],select,summary,label{touch-action:manipulation}
             res = { level: 'bad', text: 'Exit with no matching entry. Not charged. Review entry camera.', sessionId: id };
           } else {
             const s = m.s;
-            const fee = freeKind(s) ? 0 : charge(facFor(s), s.startAt, at, s.validation);
+            const fee = freeKind(s) ? 0 : stayCharge(s, at, s.validation);
             const paid = paidOf(s); let bal = Math.max(0, round2(fee + extrasOf(s) - paid));
             const payments = (s.payments || []).slice();
             const member = s.memberId ? L('members').find(x => x.id === s.memberId) : memberForPlate(normPlate(s.plate));
             if (s.waived) { res = { level: 'ok', text: 'Exited, balance waived' }; bal = 0; }
             else if (bal > 0 && m.how !== 'exact') res = { level: 'warn', text: 'Exit read as ' + pl + ' matched ' + s.plate + ' (' + m.how + '). ' + money(bal) + ' held for staff review, not charged' };
             else if (bal > 0 && member && opts.deferAutopay) {
-              const past = cfg().collectPastDue === false ? [] : L('sessions').filter(x => x.id !== s.id && normPlate(x.plate) === normPlate(s.plate) && x.endAt && balanceOf(x) > 0);
+              const past = cfg().collectPastDue === false ? [] : ofPlate(normPlate(s.plate)).filter(x => x.id !== s.id && x.endAt && balanceOf(x) > 0);
               res = { level: 'ok', text: 'Charging ' + money(bal + sum(past, balanceOf)) + ' to card on file' + (past.length ? ' (includes ' + past.length + ' past-due)' : ''), charge: { memberId: member.id, items: [{ sessionId: s.id, amount: bal }].concat(past.map(x => ({ sessionId: x.id, amount: balanceOf(x) }))) } };
             }
             else if (bal > 0 && member) { payments.push({ amount: bal, at, method: 'autopay' }); res = { level: 'ok', text: 'Charged ' + money(bal) + ' to card on file' }; bal = 0; }
@@ -822,10 +842,10 @@ button,[data-act],select,summary,label{touch-action:manipulation}
       const permits = permitsForPlate(pl), valid = permits.filter(permitValid);
       const here = valid.find(p => permitCovers(p, facId));
       const vip = vipForPlate(pl, facId);
-      const sess = L('sessions').filter(s => normPlate(s.plate) === pl && s.facilityId === facId && isLive(s)).sort((a, b) => b.startAt - a.startAt)[0];
+      const sess = ofPlate(pl).filter(s => s.facilityId === facId && isLive(s)).sort((a, b) => b.startAt - a.startAt)[0];
       const member = memberForPlate(pl);
       const openC = L('citations').filter(c => normPlate(c.plate) === pl && (c.status === 'open' || c.status === 'appeal'));
-      const owed = L('sessions').filter(s => normPlate(s.plate) === pl && s.endAt && balanceOf(s) > 0);
+      const owed = ofPlate(pl).filter(s => s.endAt && balanceOf(s) > 0);
       const r = { plate: pl, facId, level: 'bad', title: 'No permit or payment', lines: [], suggest: 'NOPERMIT', permits, member, openC, owed, sess, vip };
       const dstr = t => new Date(t).toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: tzOf(f) });
       if (here) { const t = ptype(here.permitTypeId); r.level = 'ok'; r.title = 'Monthly parker'; r.suggest = null; r.lines.push((t ? t.name : 'Monthly') + ' · #' + here.number + ' · ' + here.holder + (here.companyName ? ' (' + here.companyName + ')' : ''), here.endAt ? 'Ends ' + dstr(here.endAt) : here.paidThrough ? 'Paid through ' + dstr(here.paidThrough - 1) : 'Active'); }
@@ -855,6 +875,20 @@ button,[data-act],select,summary,label{touch-action:manipulation}
       const hot = isHot(pl); if (hot) { r.hot = hot; r.lines.push('Hot list: ' + money(hot.total) + ' owed across ' + hot.count + ' item' + (hot.count > 1 ? 's' : '')); }
       r.towEligible = openC.length >= 3 || !!hot;
       return r;
+    }
+    /* What a plate check found, for the patrol log: a violator (the check suggests a notice) or not, and why in a word or two. */
+    function checkKind(r) {
+      if (!r) return { violator: false, kind: 'other', label: 'Checked' };
+      if (r.suggest) return { violator: true, kind: String(r.suggest).toLowerCase(), label: r.title };
+      const t = r.title || '';
+      if (/^Monthly parker/.test(t)) return { violator: false, kind: 'monthly', label: 'Monthly parker' };
+      if (/^VIP/.test(t)) return { violator: false, kind: 'vip', label: 'VIP' };
+      if (/^Reservation/.test(t)) return { violator: false, kind: 'reservation', label: 'Reservation' };
+      if (/within grace/.test(t)) return { violator: false, kind: 'grace', label: 'In grace period' };
+      if (/^Paid session/.test(t)) return { violator: false, kind: 'paid', label: 'Paid' };
+      if (r.sess && r.sess.validation) return { violator: false, kind: 'validated', label: 'Validated' };
+      if (r.sess) return { violator: false, kind: 'exit', label: 'Pays on exit' };
+      return { violator: false, kind: 'other', label: t || 'OK' };
     }
 
     /* ---------- validations & tenants ---------- */
@@ -938,7 +972,7 @@ button,[data-act],select,summary,label{touch-action:manipulation}
     /* ---------- vehicle profile ---------- */
     function vehicleProfile(plate) {
       const pl = normPlate(plate); if (!pl) return null;
-      const sessions = L('sessions').filter(s => normPlate(s.plate) === pl).sort((a, b) => (b.startAt || b.endAt || 0) - (a.startAt || a.endAt || 0));
+      const sessions = ofPlate(pl).sort((a, b) => (b.startAt || b.endAt || 0) - (a.startAt || a.endAt || 0));
       const closed = sessions.filter(s => s.startAt && s.endAt);
       const paid = round2(sum(sessions, paidOf)), debt = plateDebt(pl);
       return { plate: pl, sessions, citations: L('citations').filter(c => normPlate(c.plate) === pl).sort((a, b) => b.issuedAt - a.issuedAt), permits: permitsForPlate(pl), member: memberForPlate(pl), vip: vipForPlate(pl), reservations: L('reservations').filter(r => resPlates(r).includes(pl)).sort((a, b) => b.start - a.start),
@@ -948,7 +982,7 @@ button,[data-act],select,summary,label{touch-action:manipulation}
 
     /* ---------- staff ticket actions ----------
        Every action returns ops and writes a line into the ticket's history. Roles are checked by the caller. */
-    const closeData = (s, at) => ({ endAt: at, fee: freeKind(s) ? 0 : charge(facFor(s), s.startAt, at, s.validation), exitCameraId: null, exitPhotoId: null, closedManually: true });
+    const closeData = (s, at) => ({ endAt: at, fee: freeKind(s) ? 0 : stayCharge(s, at, s.validation), exitCameraId: null, exitPhotoId: null, closedManually: true });
     const TICKET = {
       create(a) {
         const pl = normPlate(a.plate), f = fac(a.facilityId), t = now(), startAt = +a.startAt || t;
@@ -1104,7 +1138,7 @@ button,[data-act],select,summary,label{touch-action:manipulation}
     };
 
     /* ---------- driver portal planners ---------- */
-    function liveForPlate(pl, facId) { return L('sessions').filter(s => normPlate(s.plate) === pl && (!facId || s.facilityId === facId) && isLive(s)).sort((a, b) => b.startAt - a.startAt)[0]; }
+    function liveForPlate(pl, facId) { return ofPlate(pl).filter(s => (!facId || s.facilityId === facId) && isLive(s)).sort((a, b) => b.startAt - a.startAt)[0]; }
     function quote(facilityId, hours, untilEndOfDay, plate) {
       const f = fac(facilityId); if (!f) return 0;
       const t = now(), live = plate ? liveForPlate(normPlate(plate), f.id) : null, from = live && live.paidUntil > t ? live.paidUntil : t;
@@ -1304,13 +1338,13 @@ button,[data-act],select,summary,label{touch-action:manipulation}
         reservations: L('reservations').filter(r => resPlates(r).includes(pl) && resActive(r)).map(r => ({ start: r.start, end: r.end, status: r.status })),
         member: memberForPlate(pl) ? { autopay: true } : null,
         vip: vip ? { freeParking: !!vip.freeParking } : null,
-        live: L('sessions').filter(s => normPlate(s.plate) === pl && isLive(s) && !s.noPlate).map(s => ({ id: s.id, ticket: ticketOf(s), mode: s.mode, paidUntil: s.paidUntil || null, startAt: s.startAt, fee: sessionFee(s), validation: s.validation ? s.validation.code : null })),
-        owed: L('sessions').filter(s => normPlate(s.plate) === pl && s.endAt && balanceOf(s) > 0).map(s => ({ id: s.id, ticket: ticketOf(s), facilityName: fname(s.facilityId), endAt: s.endAt, balance: balanceOf(s), lateFee: +s.lateFee || 0 })),
+        live: ofPlate(pl).filter(s => isLive(s) && !s.noPlate).map(s => ({ id: s.id, ticket: ticketOf(s), mode: s.mode, paidUntil: s.paidUntil || null, startAt: s.startAt, fee: sessionFee(s), validation: s.validation ? s.validation.code : null })),
+        owed: ofPlate(pl).filter(s => s.endAt && balanceOf(s) > 0).map(s => ({ id: s.id, ticket: ticketOf(s), facilityName: fname(s.facilityId), endAt: s.endAt, balance: balanceOf(s), lateFee: +s.lateFee || 0 })),
         citations: L('citations').filter(c => normPlate(c.plate) === pl && c.status !== 'voided').sort((a, b) => b.issuedAt - a.issuedAt).map(c => ({ id: c.id, photoIds: c.photoIds || [], number: c.number, violationName: c.violationName, fine: c.fine, facilityName: fname(c.facilityId), issuedAt: c.issuedAt, status: c.status, hasAppeal: !!c.appeal, appealDecision: c.appeal && c.appeal.decision || null })),
       };
     }
 
-    return { newMonthlyNumber, accountRoom, accountUsed, planAccountParkers, ROLES, ROLE_NAMES, METHODS, can, canonRole, ticketOf, ticketNo, snapRates, facFor, histAdd, endOfDate, ticketBill, extrasOf, freeKind, validPermitFor, vipForPlate, sessionsForCode, codeOccupancy, arAging, vehicleProfile, validationText, staleHours, TICKET, prorate, priceDetail, rateSummary, taxOf, specialQualifies, monthBounds, planMonthlyDue, sessionByToken, needsReview, cfg, plateDebt, isHot, hotList, planCollections, resAvailability, reservationFor, activeReservation, planNoShows, resActive, resPlates, M, H, D, normPlate, canon, uid, round2, money, sum, now, fac, ptype, tenant, camera, tzOf, dayStart, nextDayStart, charge, paidOf, sessionFee, balanceOf, isLive, onSiteSessions, occupancy, spaceUse, homeOf, repeatValidations, isEvent, eventAt, entryDue, permitValid, permitCovers, permitsForPlate, memberForPlate, soldOf, unpaidSessions, exitStatus, findLive, planRead, checkPlate, findValidation, planApplyValidation, sessionsForTenant, concurrency, tenantDays, PORTAL, lookup, quote, liveForPlate };
+    return { newMonthlyNumber, accountRoom, accountUsed, planAccountParkers, ROLES, ROLE_NAMES, METHODS, can, canonRole, ticketOf, ticketNo, snapRates, facFor, histAdd, endOfDate, ticketBill, extrasOf, freeKind, validPermitFor, vipForPlate, sessionsForCode, codeOccupancy, arAging, vehicleProfile, validationText, staleHours, TICKET, prorate, priceDetail, rateSummary, taxOf, specialQualifies, monthBounds, planMonthlyDue, sessionByToken, needsReview, cfg, plateDebt, isHot, hotList, planCollections, resAvailability, reservationFor, activeReservation, planNoShows, resActive, resPlates, M, H, D, normPlate, canon, uid, round2, money, sum, now, fac, ptype, tenant, camera, tzOf, dayStart, nextDayStart, charge, paidOf, sessionFee, balanceOf, isLive, onSiteSessions, occupancy, spaceUse, homeOf, repeatValidations, isEvent, eventAt, entryDue, permitValid, permitCovers, permitsForPlate, memberForPlate, soldOf, unpaidSessions, exitStatus, findLive, planRead, checkPlate, checkKind, findValidation, planApplyValidation, sessionsForTenant, concurrency, tenantDays, PORTAL, lookup, quote, liveForPlate };
   }
   Rules.normPlate = normPlate; Rules.ROLES = ROLES; Rules.ROLE_NAMES = ROLE_NAMES; Rules.can = can; Rules.canonRole = canonRole; Rules.METHODS = METHODS;
   if (typeof module !== 'undefined' && module.exports) module.exports = Rules; else root.ParkRules = Rules;
@@ -1502,7 +1536,9 @@ window.PARKOPS_HOSTED = (function () {
       const st = await api('GET', '/api/state');
       role = st.role; webhookBase = st.webhookBase; config = st.config; feed = st.feed || []; payments = st.payments; account = st.account; user = st.user; sms = st.sms || null; terminal = st.terminal || null; email = !!st.email; screenSince = st.screenSince || null; scan = st.scan || null;
       COLLS.forEach(c => (st[c] || []).forEach(d => data[c].set(d.id, strip(d))));
-      stream();
+      /* Only staff screens take live updates. A driver's page has what it needs from this first load, and thousands of
+         drivers holding a connection open on a busy night would only take room from the exit desks. */
+      if (user) stream(); else { const lv = document.querySelector('#live'); if (lv) lv.hidden = true; }
       /* Which console views a role gets: owners, managers and attendants work tickets and enforcement; accountants and
          viewers see the operations console read-only (the server refuses their writes). The public gets the driver portal. */
       const roles = role === 'public' ? ['portal'] : role === 'attendant' ? ['ops', 'enf', 'portal'] : role === 'viewer' || role === 'accountant' ? ['ops', 'portal'] : ['ops', 'enf', 'portal'];
@@ -1551,7 +1587,7 @@ const TIMEZONES=[['America/New_York','Eastern'],['America/Chicago','Central'],['
 /* ============ state ============ */
 const S={roles:null,role:'viewer',perms:new Set(),facilities:[],permitTypes:[],permits:[],sessions:[],citations:[],validations:[],members:[],tenants:[],cameras:[],reservations:[],companies:[],invoices:[],vips:[],ratings:[],config:null,feed:[],loaded:new Set(),db:null,online:null,writable:true};
 const R=ParkRules(S);
-const UI={role:store.get('role')||'ops',tab:store.get('tab')||'overview',permitQ:'',permitStatus:'all',citeStatus:'open',citeQ:'',check:null,enfFac:store.get('enfFac')||'',actFac:store.get('actFac')||'',auditRange:'today',auditFilter:'all',tenant:store.get('tenant')||'',tenantDay:0,lookup:'',lookupData:null,appealFor:null,receipt:null,lprResult:null};
+const UI={role:store.get('role')||'ops',tab:store.get('tab')||'overview',permitQ:'',permitStatus:'all',citeStatus:'open',citeQ:'',check:null,enfFac:store.get('enfFac')||'',enfView:store.get('enfView')||'check',citeView:store.get('citeView')||'list',actFac:store.get('actFac')||'',auditRange:'today',auditFilter:'all',tenant:store.get('tenant')||'',tenantDay:0,lookup:'',lookupData:null,appealFor:null,receipt:null,lprResult:null};
 const COLLS=['facilities','permitTypes','permits','sessions','citations','validations','members','tenants','cameras','reservations','companies','invoices','vips','ratings'];
 const facById=id=>S.facilities.find(f=>f.id===id);
 const typeById=id=>S.permitTypes.find(t=>t.id===id);
@@ -2197,11 +2233,14 @@ function permitForm(p){
 /* ============ citations ============ */
 const citePill=c=>`<span class="pill ${({open:'bad',paid:'ok',appeal:'warn',voided:''})[c.status]||''}">${({open:'Open',paid:'Paid',appeal:'Under appeal',voided:'Voided'})[c.status]||c.status}</span>`;
 function vCitations(){
+  const logOn=HOSTED&&window.vPatrol;if(!logOn)UI.citeView='list';
+  const viewSeg=logOn?`<div class="seg" role="group" aria-label="Notices view"><button data-act="citeView" data-v="list" aria-pressed="${UI.citeView!=='patrol'}">Notices</button><button data-act="citeView" data-v="patrol" aria-pressed="${UI.citeView==='patrol'}">Patrol log</button></div>`:'';
+  if(UI.citeView==='patrol')return `<div class="pagehead"><div><h1>Patrol log</h1><p>Every plate officers checked, by day and location: who was violating, who wasn’t, and the notices written.</p></div><div class="row">${viewSeg}<button class="btn pri" data-role-go="enf">Check plates</button></div></div><div style="display:grid;gap:14px">${window.vPatrol()}</div>`;
   const qp=normPlate(UI.citeQ);
   const rows=S.citations.filter(c=>(UI.citeStatus==='all'||c.status===UI.citeStatus)&&(!qp||normPlate(c.plate).includes(qp)||String(c.number).includes(qp))).sort((a,b)=>b.issuedAt-a.issuedAt);
   const stBtn=(k,l)=>`<button data-act="citeStatus" data-v="${k}" aria-pressed="${UI.citeStatus===k}">${l} <span class="muted">${k==='all'?S.citations.length:S.citations.filter(c=>c.status===k).length}</span></button>`;
   const repeat={};S.citations.filter(c=>c.status==='open').forEach(c=>{const p=normPlate(c.plate);repeat[p]=(repeat[p]||0)+1});
-  return `<div class="pagehead"><div><h1>Parking charge notices</h1><p>Notices left on windshields for unpaid or improper parking, with payments and disputes. Plates with 3 or more open notices are flagged for boot or tow.</p></div><button class="btn pri" data-role-go="enf">Issue a notice</button></div>
+  return `<div class="pagehead"><div><h1>Parking charge notices</h1><p>Notices left on windshields for unpaid or improper parking, with payments and disputes. Plates with 3 or more open notices are flagged for boot or tow.</p></div><div class="row">${viewSeg}<button class="btn pri" data-role-go="enf">Issue a notice</button></div></div>
   <section class="panel"><div class="panel-h"><div class="filters" style="margin-right:auto"><div class="seg">${stBtn('open','Open')}${stBtn('appeal','Disputes')}${stBtn('paid','Paid')}${stBtn('voided','Voided')}${stBtn('all','All')}</div><input id="citeQ" type="search" placeholder="Plate or notice #" value="${esc(UI.citeQ)}" data-fresh="1"></div></div>
   ${rows.length?`<div class="tbl-wrap"><table><thead><tr><th>Notice</th><th>Plate</th><th>Location</th><th>Reason</th><th class="r">Amount</th><th>Issued</th><th>Status</th><th></th></tr></thead><tbody>${rows.map(c=>{const f=facById(c.facilityId);const rep=repeat[normPlate(c.plate)]>=3;
     return `<tr><td class="mono">${esc(c.number)}<span class="sub">${esc(c.officer||'')}</span></td><td>${plateChip(c.plate)} ${rep?'<span class="pill bad">Tow eligible</span>':''}</td><td>${esc(f?f.name:'—')}</td><td>${esc(c.violationName||c.violation)}${c.notes?`<span class="sub">${esc(c.notes)}</span>`:''}${c.status==='appeal'&&c.appeal?`<span class="sub"><b>Appeal:</b> “${esc(c.appeal.reason)}”</span>`:''}${c.appeal&&c.appeal.decision?`<span class="sub">Appeal ${esc(c.appeal.decision)}</span>`:''}</td><td class="r num">${money(c.fine)}</td><td class="num">${fmtTime(c.issuedAt,tzF(facById(c.facilityId)))}</td><td>${citePill(c)}</td>
@@ -2219,8 +2258,8 @@ function vLpr(){
   ${HOSTED?'':`<div class="callout warn"><b>Live camera connection runs on the hosted version.</b> This page can’t receive camera traffic directly. Deploy the ParkOps server from the download, then point each camera at its lane URL. Until then, use test reads or import a CSV export from your cameras.</div>`}
   <section class="panel"><div class="panel-h"><h2>Lane cameras</h2><span class="muted" style="font-size:.84rem">Lanes with no read in 2 hours are flagged</span></div>
   ${cams.length?`<div class="tbl-wrap"><table><thead><tr><th>Camera</th><th>Facility</th><th>Lane</th><th class="r">Reads today</th><th>Last read</th><th>Camera sends to</th><th></th></tr></thead><tbody>${cams.map(c=>{const f=facById(c.facilityId);const u=webhookUrl(c);
-    return `<tr><td><b>${esc(c.name)}</b><span class="sub">${esc(c.model||'')}</span></td><td>${esc(f?f.name:'—')}</td><td><span class="pill ${c.direction==='in'?'ok':'info'}">${c.direction==='in'?'Entry':'Exit'}</span></td><td class="r num">${reads(c)}</td><td class="num">${c.lastReadAt?ago(c.lastReadAt):'Never'} ${stale(c)?'<span class="pill warn">Quiet</span>':''}${c.lastPlate?`<span class="sub">${esc(c.lastPlate)}</span>`:''}</td>
-    <td>${u?`<div class="url"><code title="${esc(u)}">${esc(u)}</code><button class="btn sm" data-act="copy" data-v="${esc(u)}">Copy</button></div>`:'<span class="muted">Shown once hosted</span>'}</td><td><div class="acts"><button class="btn sm" data-act="editCamera" data-id="${c.id}">Edit</button></div></td></tr>`}).join('')}</tbody></table></div>`:'<div class="empty">No lane cameras yet. Add one camera per entry lane and one per exit lane.</div>'}</section>
+    return `<tr><td><b>${esc(c.name)}</b><span class="sub">${esc(/^https?:\/\//i.test(c.model||'')?'':c.model||'')}</span>${c.adminUrl||/^https?:\/\//i.test(c.model||'')?`<a class="sub" href="${esc(c.adminUrl||c.model)}" target="_blank" rel="noopener">Camera page ↗</a>`:''}</td><td>${esc(f?f.name:'—')}</td><td><span class="pill ${c.direction==='in'?'ok':'info'}">${c.direction==='in'?'Entry':'Exit'}</span></td><td class="r num">${reads(c)}</td><td class="num">${c.lastReadAt?ago(c.lastReadAt):c.lastEventAt?'<span class="pill warn">No plate in messages</span>':'<span class="pill">Waiting for first read</span>'} ${c.lastReadAt&&stale(c)?'<span class="pill warn">Quiet</span>':''}${c.lastPlate?`<span class="sub">${esc(c.lastPlate)}</span>`:''}</td>
+    <td>${u?`<div class="url"><code title="${esc(u)}">${esc(u)}</code><button class="btn sm" data-act="copy" data-v="${esc(u)}">Copy</button></div>`:'<span class="muted">Shown once hosted</span>'}</td><td><div class="acts"><button class="btn sm ${c.lastReadAt?'':'pri'}" data-act="cameraConnect" data-id="${c.id}">Connect</button><button class="btn sm" data-act="editCamera" data-id="${c.id}">Edit</button></div></td></tr>`}).join('')}</tbody></table></div>`:'<div class="empty">No lane cameras yet. Add one camera per entry lane and one per exit lane.</div>'}</section>
   <div class="grid g2e">
   <section class="panel"><div class="panel-h"><h2>Send a test read</h2></div><form class="panel-b" data-form="lprRead" style="display:grid;gap:12px">
     <div class="form-grid"><div class="field span"><label for="lCam">Lane camera</label><select id="lCam">${cams.map(c=>`<option value="${c.id}">${esc((facById(c.facilityId)||{}).name||'')} · ${esc(c.name)} (${c.direction==='in'?'entry':'exit'})</option>`).join('')||'<option value="">Add a lane camera first</option>'}</select></div>
@@ -2237,16 +2276,49 @@ function cameraForm(c){
   c=c||{};
   if(!S.facilities.length){toast('Add a facility first.',true);return}
   openForm({title:c.id?'Edit '+c.name:'Add lane camera',submit:c.id?'Save changes':'Add camera',fields:[
-    {id:'name',label:'Camera name',value:c.name,required:true,help:'e.g. “North Garage Entry 1”'},
+    {id:'name',label:'Camera name',value:c.name,required:true,help:'e.g. “Garage 4 Exit 1”'},
     {id:'facilityId',label:'Facility',type:'select',options:S.facilities.map(f=>[f.id,f.name]),value:c.facilityId},
-    {id:'direction',label:'Lane',type:'select',options:[['in','Entry lane'],['out','Exit lane']],value:c.direction||'in'},
-    {id:'model',label:'Camera model',value:c.model||'',help:'For your records, e.g. Hikvision iDS-TCM403 or Axis P1465-LE-3'},
+    {id:'direction',label:'Lane',type:'select',options:[['in','Entry lane'],['out','Exit lane']],value:c.direction||'in',help:'Which way the cars this camera reads are going. A swapped lane records entries as exits.'},
+    {id:'model',label:'Camera model',value:/^https?:\/\//i.test(c.model||'')?'':c.model||'',help:'For your records, e.g. Hikvision iDS-TCM403 or Axis P1465-LE-3'},
+    {id:'adminUrl',label:'Camera’s own web page (optional)',value:c.adminUrl||(/^https?:\/\//i.test(c.model||'')?c.model:''),span:true,help:'The address you open to manage the camera, kept here as a link. ParkOps doesn’t connect to it: the camera sends its plate reads to ParkOps. After saving, Connect shows the address to put in the camera.'},
   ],extra:c.id?`<button type="button" class="btn danger" data-dlg="delete">Remove camera</button>`:'',
   onExtra:()=>write(db=>col(db,'cameras').doc(c.id).delete(),'Camera removed'),
-  onSubmit:v=>{const data={name:v.name.trim(),facilityId:v.facilityId,direction:v.direction,model:v.model.trim()};
+  onSubmit:v=>{let model=v.model.trim(),adminUrl=v.adminUrl.trim();
+    if(/^https?:\/\//i.test(model)&&!adminUrl){adminUrl=model;model=''}
+    if(adminUrl&&!/^https?:\/\//i.test(adminUrl))adminUrl='http://'+adminUrl;
+    const data={name:v.name.trim(),facilityId:v.facilityId,direction:v.direction,model,adminUrl};
     if(c.id)return write(db=>col(db,'cameras').doc(c.id).update(data),'Camera saved');
     data.token=Array.from(crypto.getRandomValues(new Uint8Array(12)),b=>b.toString(16).padStart(2,'0')).join('');data.createdAt=now();
-    return addDoc('cameras',data,R.uid('c')).then(ok=>{if(ok)toast('Camera added');return ok})}});
+    const id=R.uid('c');
+    return addDoc('cameras',data,id).then(ok=>{if(ok){toast('Camera added. Next: connect it.');setTimeout(()=>{const cam=byId('cameras',id);if(cam&&!dlg.open)cameraConnect(cam)},500)}return ok})}});
+}
+/* Connecting a lane camera. The camera sends each plate it reads to its lane address on this site; ParkOps never
+   reaches into the camera, which usually sits on a private network the internet can't see. This screen gives the
+   address, the steps, and what the camera last sent, so a setup problem can be seen from here. */
+function cameraConnect(c){
+  if(!c)return;
+  const u=webhookUrl(c),f=facById(c.facilityId),host=u?u.replace(/^https?:\/\/([^/]+).*$/,'$1'):location.host;
+  const lane=c.direction==='in'?'entry':'exit',hint=String(c.adminUrl||'')+' '+String(c.name||'');
+  const mismatch=(/exit/i.test(c.adminUrl||'')&&c.direction==='in')?'The camera’s web address says “exit”, but this lane is set as an entry.':(/entr/i.test(c.adminUrl||'')&&c.direction==='out')?'The camera’s web address says “entr…”, but this lane is set as an exit.':'';
+  void hint;
+  const status=c.lastReadAt?`<b>Connected.</b> Last plate read ${esc(ago(c.lastReadAt))}${c.lastPlate?` (${esc(c.lastPlate)})`:''}.`
+    :c.lastEventAt?`<b>The camera is reaching ParkOps, but its messages had no plate ParkOps could read</b> (last one ${esc(ago(c.lastEventAt))}${c.lastIgnored?`: ${esc(c.lastIgnored)}`:''}). Check step 2: the message must carry the plate, as JSON or as <span class="mono">?plate=</span> in the address.`
+    :'<b>Waiting for the first read.</b> Nothing has arrived from this camera yet.';
+  openForm({title:'Connect '+c.name,submit:'Done',body:`<div style="display:grid;gap:14px">
+    <div class="callout ${c.lastReadAt?'':'warn'}" style="margin:0">${status}</div>
+    ${mismatch?`<div class="callout warn" style="margin:0"><b>Check the lane.</b> ${esc(mismatch)} If this camera watches cars leaving, open Edit and set Lane to Exit lane, or every visit through it will be recorded backwards.</div>`:''}
+    <div class="field"><label for="laneUrl">This lane’s address (${esc(f?f.name:'')} · ${lane})</label><div class="row" style="gap:8px;flex-wrap:nowrap"><input id="laneUrl" readonly value="${esc(u||'Shown once hosted')}" class="mono" style="flex:1"><button type="button" class="btn" id="copyLane">Copy</button></div></div>
+    <ol style="margin:0;padding-left:20px;display:grid;gap:8px">
+      <li>Open the camera’s settings${c.adminUrl?` at <a href="${esc(c.adminUrl)}" target="_blank" rel="noopener">${esc(c.adminUrl)}</a>`:''}. That page is on your network, so open it from a computer there; ParkOps can’t open it for you.</li>
+      <li>In the camera’s plate-reading app, find where it sends events to a server (often called <i>HTTP push</i>, <i>event push</i>, <i>notification</i> or <i>HTTP recipient</i>). Add the address above. Use <b>POST</b> with <b>JSON</b> if offered. If the app can only call a web address, use the address followed by <span class="mono">?plate=</span> and the app’s plate placeholder.</li>
+      <li>Send only new cars (on Axis License Plate Verifier, ParkOps counts <span class="mono">carState: new</span> and ignores updates). Turn on the plate picture if the app offers it.</li>
+      <li>The camera must be able to reach <b>${esc(host)}</b> on the internet (HTTPS, port 443). If it sits on a company network, ask that network’s IT team to allow it.</li>
+      <li>Drive a car past or hold up a plate. This screen and the Cameras page then show the time and the plate. If nothing arrives within a minute, check step 4.</li>
+    </ol>
+    ${c.lastSample?`<details><summary class="muted" style="cursor:pointer">What the camera sent last (for troubleshooting)</summary><pre class="mono" style="white-space:pre-wrap;font-size:.75rem;max-height:220px;overflow:auto;background:var(--surface-2);padding:8px;border-radius:6px;margin:8px 0 0">${esc(c.lastSample)}</pre></details>`:''}
+  </div>`,onSubmit:()=>true});
+  const cp=$('#copyLane',dlgForm);if(cp)cp.onclick=async()=>{const el=$('#laneUrl',dlgForm);try{await navigator.clipboard.writeText(el.value);toast('Address copied')}catch(e){el.select();document.execCommand('copy');toast('Address copied')}};
+  const li=$('#laneUrl',dlgForm);if(li)li.onfocus=()=>li.select();
 }
 /* ---------- camera export import (Axis License Plate Verifier and other CSVs) ----------
    Reads the file in the browser, guesses which column holds the plate, the camera and the time, and shows a preview
@@ -2404,7 +2476,12 @@ function vEnforcement(){
   const officer=store.get('officer')||'';
   const sweep=R.onSiteSessions(f).filter(s=>s.kind!=='permit'&&!s.noPlate).map(s=>({s,r:R.checkPlate(s.plate,f.id)})).sort((a,b)=>({bad:0,warn:1,ok:2}[a.r.level])-({bad:0,warn:1,ok:2}[b.r.level]));
   const mine=S.citations.filter(c=>c.facilityId===f.id&&now()-c.issuedAt<D).sort((a,b)=>b.issuedAt-a.issuedAt);
+  const logOn=HOSTED&&window.vPatrol;if(!logOn)UI.enfView='check';
+  const viewSeg=logOn?`<div class="seg" role="group" aria-label="Enforcement view" style="justify-self:start"><button data-act="enfView" data-v="check" aria-pressed="${UI.enfView!=='log'}">Check plates</button><button data-act="enfView" data-v="log" aria-pressed="${UI.enfView==='log'}">Patrol log</button></div>`:'';
+  if(UI.enfView==='log')return `<div class="enf wide">${viewSeg}${window.vPatrol()}</div>`;
+  const today=logOn&&window.patSummary?window.patSummary(f.id):null;
   return `<div class="enf">
+  ${viewSeg}
   ${HOSTED&&window.scanCard?window.scanCard():''}
   <section class="panel"><form class="panel-b" data-form="check" style="display:grid;gap:12px">
     <div class="row"><div class="field"><label for="enfFac">Patrolling</label><select id="enfFac" data-fresh="1">${S.facilities.map(x=>`<option value="${x.id}" ${x.id===UI.enfFac?'selected':''}>${esc(x.name)}</option>`).join('')}</select></div>
@@ -2426,6 +2503,7 @@ function vEnforcement(){
   ${lastC&&HOSTED&&window.printPanel?window.printPanel(lastC):lastC?`<section class="panel"><div class="panel-h"><h3>Notice ${esc(lastC.number)} issued</h3><span class="pill bad">${money(lastC.fine)}</span></div><div class="panel-b row"><button class="btn pri" data-act="doneCitePilot">Done · next plate</button><span class="note">Printing on a Zebra printer needs the hosted version.</span></div></section>`:''}
   <section class="panel"><div class="panel-h"><h3>Sweep: ${esc(f.name)}</h3><span class="muted" style="font-size:.84rem">Visitor vehicles on record, problems first</span></div>
     ${sweep.length?`<div class="list">${sweep.map(({s,r})=>`<div class="li"><span class="sev ${r.level}"></span>${plateChip(s.plate)}<div class="grow"><b>${esc(r.title)}</b><span class="muted" style="display:block;font-size:.82rem">${s.mode==='prepaid'?'Paid until '+fmtTime(s.paidUntil):'Entered '+fmtTime(s.startAt)}</span></div></div>`).join('')}</div>`:'<div class="empty">No visitor vehicles recorded here.</div>'}</section>
+  ${today?`<section class="panel"><div class="panel-h"><h3>Today at ${esc(f.name)}</h3><button class="btn sm" data-act="enfView" data-v="log">Patrol log</button></div><div class="panel-b row" style="gap:8px"><span class="pill">${today.checked} checked</span><span class="pill ${today.violators?'bad':''}">${today.violators} violator${today.violators===1?'':'s'}</span><span class="pill ok">${today.ok} not violating</span>${today.flagged?`<span class="pill warn">${today.flagged} flagged, no notice</span>`:''}</div></section>`:''}
   <section class="panel"><div class="panel-h"><h3>Notices here, last 24 hours</h3></div>
     ${mine.length?`<div class="list">${mine.map(c=>`<div class="li"><span class="sev bad"></span>${plateChip(c.plate)}<div class="grow"><b>${esc(c.violationName)}</b><span class="muted" style="display:block;font-size:.82rem">${esc(c.number)} · ${fmtTime(c.issuedAt,tzF(facById(c.facilityId)))} · ${esc(c.officer||'')}</span></div>${citePill(c)}</div>`).join('')}</div>`:'<div class="empty">None yet today.</div>'}</section>
   </div>`;
@@ -2437,7 +2515,7 @@ async function issueCitation({plate,facId,code,officer,notes,sessionId,plateStat
   const number='C'+Date.now().toString(36).toUpperCase().slice(-6);
   const id=R.uid('c');
   const ok=await addDoc('citations',{number,plate:pl,plateState:(plateState||'').toUpperCase().slice(0,2),facilityId:facId,violation:v.code,violationName:v.name,fine:+v.fine||0,officer:officer||'',notes:notes||'',issuedAt:now(),status:'open',sessionId:sessionId||null,photoIds:photoIds||[]},id);
-  if(ok){toast(`Notice ${number} issued to ${pl}`);UI.lastCite=id}return ok;
+  if(ok){toast(`Notice ${number} issued to ${pl}`);UI.lastCite=id;if(window.patReset)window.patReset()}return ok;
 }
 
 /* ============ driver portal ============ */
@@ -2537,11 +2615,12 @@ let toastT;function toast(msg,err){const t=$('#toast');t.textContent=msg;t.class
 /* ============ actions ============ */
 const VIEWS={overview:vOverview,activity:vActivity,tenants:vTenants,facilities:vFacilities,permits:vPermits,citations:vCitations,lpr:vLpr,settings:vSettings,reservations:()=>window.vReservations?window.vReservations():'',payments:()=>window.vPayments?window.vPayments():'',history:()=>window.vHistory?window.vHistory():'',daily:()=>window.vDaily?window.vDaily():'',selfparking:()=>window.vSelfParking?window.vSelfParking():'',review:()=>window.vReview?window.vReview():'',valet:()=>window.vValet?window.vValet():'',reports:()=>window.vReports?window.vReports():''};
 const ACT={
+  cameraConnect(b){cameraConnect(byId('cameras',b.dataset.id))},
   impRun(){runImport()},
   impCancel(){UI.imp=null;render()},
   goTab(b){UI.tab=b.dataset.tab;store.set('tab',UI.tab);const f=b.dataset.filter;if(f){if(UI.tab==='permits')UI.permitStatus=f==='pending'?'all':f;if(UI.tab==='citations')UI.citeStatus=f;if(UI.tab==='activity'){UI.auditFilter=f;UI.auditRange='week'}if(UI.tab==='selfparking'){UI.spView='tickets';UI.tkStatus=f;UI.tkRange='month'}}
     if(b.dataset.tenant){UI.tenant=b.dataset.tenant;UI.tenantDay=0}if(b.dataset.fac){UI.actFac=b.dataset.fac;store.set('actFac',UI.actFac)}render();window.scrollTo(0,0)},
-  permitStatus(b){UI.permitStatus=b.dataset.v;render()},enfZone(b){UI.enfZone=b.dataset.v;render()},citeStatus(b){UI.citeStatus=b.dataset.v;render()},auditFilter(b){UI.auditFilter=b.dataset.v;render()},
+  permitStatus(b){UI.permitStatus=b.dataset.v;render()},enfZone(b){UI.enfZone=b.dataset.v;render()},enfView(b){UI.enfView=b.dataset.v;store.set('enfView',UI.enfView);render();window.scrollTo(0,0)},citeView(b){UI.citeView=b.dataset.v;store.set('citeView',UI.citeView);render()},citeStatus(b){UI.citeStatus=b.dataset.v;render()},auditFilter(b){UI.auditFilter=b.dataset.v;render()},
   pickTenant(b,e){if(e.target.closest('[data-act=editTenant]'))return;UI.tenant=b.dataset.id;UI.tenantDay=0;store.set('tenant',UI.tenant);render()},
   tenantDay(b){UI.tenantDay=Math.max(0,Math.min(29,UI.tenantDay+(+b.dataset.v)));render()},
   tenantDayPick(b){UI.tenantDay=29-(+b.dataset.i);render()},
@@ -2601,7 +2680,7 @@ const ACT={
   citePaid(b){const c=byId('citations',b.dataset.id);write(db=>col(db,'citations').doc(c.id).update({status:'paid',paidAt:now(),paidVia:'office'}),`Citation ${c.number} marked paid`)},
   citeVoid(b){const c=byId('citations',b.dataset.id);confirmBox('Void citation',`Void citation ${esc(c.number)} for ${esc(c.plate)}?`,'Void citation',()=>write(db=>col(db,'citations').doc(c.id).update({status:'voided',voidedAt:now()}),'Citation voided'))},
   appealDecide(b){const c=byId('citations',b.dataset.id);const d=b.dataset.v;write(db=>col(db,'citations').doc(c.id).update({status:d==='approved'?'voided':'open',appeal:Object.assign({},c.appeal,{decision:d,decidedAt:now()})}),d==='approved'?'Appeal approved, citation voided':'Appeal denied, citation reopened')},
-  async checkPlate(b){const pl=b.dataset.plate;if(UI.role==='portal'){UI.lookup=pl;await refreshLookup();render();return}if(UI.role==='ops'){UI.tab='selfparking';UI.spView='vehicle';UI.vehicle=pl;store.set('tab',UI.tab);render();window.scrollTo(0,0);return}if(!S.roles.includes('enf'))return;UI.role='enf';store.set('role','enf');const cur=S.sessions.find(s=>normPlate(s.plate)===pl&&R.isLive(s));if(cur)UI.enfFac=cur.facilityId;UI.check={plate:pl,facId:UI.enfFac};render();window.scrollTo(0,0)},
+  async checkPlate(b){const pl=b.dataset.plate;if(UI.role==='portal'){UI.lookup=pl;await refreshLookup();render();return}if(UI.role==='ops'){UI.tab='selfparking';UI.spView='vehicle';UI.vehicle=pl;store.set('tab',UI.tab);render();window.scrollTo(0,0);return}if(!S.roles.includes('enf'))return;UI.role='enf';store.set('role','enf');UI.enfView='check';const cur=S.sessions.find(s=>normPlate(s.plate)===pl&&R.isLive(s));if(cur)UI.enfFac=cur.facilityId;UI.check={plate:pl,facId:UI.enfFac};render();window.scrollTo(0,0)},
   addViolation(){const v=[...violations(),{code:'NEW',name:'New violation',fine:0}];write(db=>db.doc('settings/config').set(Object.assign({},S.config||{},{violations:v})))},
   /* Demo helper: sample records keep their shape but every time on them moves forward so the latest sample activity is "now". */
   refreshSamples(){
@@ -2627,7 +2706,7 @@ const ACT={
 };
 const FORMS={
   async lprRead(){const cam=$('#lCam').value;if(!cam){toast('Add a lane camera first.',true);return}const r=await lprRead({plate:$('#lPlate').value,cameraId:cam});UI.lprResult=r;$('#lPlate').value='';render()},
-  check(){const pl=normPlate($('#enfPlate').value);if(!pl){toast('Enter a plate to check.',true);return}UI.check={plate:pl,facId:UI.enfFac};UI.lastCite=null;$('#enfPlate').value='';render()},
+  check(){const pl=normPlate($('#enfPlate').value);if(!pl){toast('Enter a plate to check.',true);return}UI.check={plate:pl,facId:UI.enfFac};UI.lastCite=null;$('#enfPlate').value='';render();if(window.recordCheck)window.recordCheck(pl,UI.enfFac,'typed')},
   async cite(){const officer=$('#citeOfficer').value.trim();store.set('officer',officer);
     let photoIds=[];if(HOSTED&&window.citePhotoIds)photoIds=window.citePhotoIds(UI.check.plate,UI.check.facId);
     const ok=await issueCitation({plate:UI.check.plate,facId:UI.check.facId,code:$('#citeViol').value,officer,notes:$('#citeNotes').value.trim(),plateState:($('#citeState')||{}).value,photoIds});
@@ -2751,11 +2830,13 @@ render();boot();
   };
   window.validateTicketDialog = function (id) {
     const s = byId('sessions', id); if (!s) return;
-    const codes = S.validations.filter(v => v.active && !R.findValidation(v.code, s.facilityId).error).sort((a, b) => a.code.localeCompare(b.code));
+    // On an event night only codes marked for event nights can be applied, so only those are offered.
+    const ev = R.eventAt(R.facFor(s), s.startAt);
+    const codes = S.validations.filter(v => v.active && !R.findValidation(v.code, s.facilityId).error && (!ev || v.eventNights)).sort((a, b) => a.code.localeCompare(b.code));
     const opts = codes.map(v => [v.code, `${v.code} · ${(v.tenantId && (byId('tenants', v.tenantId) || {}).name) || v.department || v.name || ''} · ${R.validationText(v)}`]);
-    if (!opts.length) { toast('No validation code is valid at ' + fname(s.facilityId) + ' right now.', true); return; }
+    if (!opts.length) { toast(ev ? `No event-night codes work at ${fname(s.facilityId)}. Mark a code “Works on event nights” under Validations.` : 'No validation code is valid at ' + fname(s.facilityId) + ' right now.', true); return; }
     openForm({ title: (s.validation ? 'Replace validation on ' : 'Validate ') + s.plate, submit: 'Apply code', fields: [
-      { id: 'code', label: 'Validation code', type: 'select', options: opts, value: opts[0][0], help: 'Only codes valid at ' + fname(s.facilityId) + ' are listed.' },
+      { id: 'code', label: 'Validation code', type: 'select', options: opts, value: opts[0][0], help: ev ? `${ev.name || 'Event'} night: only codes that work on event nights are listed.` : 'Only codes valid at ' + fname(s.facilityId) + ' are listed.' },
       ...(s.validation ? [{ id: 'reason', label: `Reason for replacing ${s.validation.code}`, required: true }] : []),
     ], onSubmit: async v => { if (!v.code) return 'Create a validation code first.'; const r = await ticketAction(id, 'validate', { code: v.code, replace: !!s.validation, reason: v.reason }, 'Validation applied'); return dlgErrorOrOk(r); } });
   };
@@ -3507,6 +3588,7 @@ render();boot();
   #chTip{position:fixed;z-index:60;background:var(--fg);color:var(--bg,#fff);padding:6px 10px;border-radius:6px;font-size:.8rem;line-height:1.35;white-space:pre-line;pointer-events:none;box-shadow:0 4px 14px rgba(0,0,0,.25);max-width:260px}
   .daytbl tr[data-act] {cursor:pointer}.daytbl tr[data-act]:hover td{background:var(--surface-2)}
   .kpis.sm .kpi b{font-size:1.55rem}
+  .pattbl td:first-child,.pattbl th:first-child{white-space:nowrap}
   .skip-note{font-size:.84rem;color:var(--muted)}`;
   document.head.appendChild(css);
   /* The print area and printNow() are shared with the self-parking screens (tickets.js). */
@@ -4518,6 +4600,91 @@ render();boot();
     dayOpen(b) { Object.assign(UI, { histQ: '', histFac: UI.dyFac || '', histStatus: '', histFrom: b.dataset.d, histTo: b.dataset.d, histOff: 0 }); UI.hist = undefined; ACT.goTab({ dataset: { tab: 'history' } }); },
   });
 
+  /* ---------- enforcement: patrol log ----------
+     Every plate an officer checks (typed, or read by the phone scanner) is saved with what the check found. Pick a day and a
+     location to see who was violating and who wasn't, with the notices written, and the week around it. */
+  window.recordCheck = function (plate, facilityId, source, extra) {
+    const pl = normPlate(plate || ''); if (pl.length < 2 || !facilityId) return Promise.resolve(null);
+    return api('POST', '/api/enforcement/check', Object.assign({ plate: pl, facilityId, source: source || 'typed', zone: UI.enfZone === 'reserved' ? 'reserved' : 'general' }, extra || {}))
+      .then(r => { patReset(); return r; }).catch(() => null);
+  };
+  const patMap = new Map();
+  function patReset() { patMap.clear(); if (UI.role === 'enf' || UI.role === 'ops' && UI.tab === 'citations' && UI.citeView === 'patrol') schedule(); }
+  window.patReset = patReset;
+  function patGet(from, to, fac, summary) {
+    const key = [from, to, fac || '', summary ? 1 : 0, to >= dayStr(Date.now()) ? Math.floor(Date.now() / 6e4) : ''].join('|');
+    let e = patMap.get(key);
+    if (!e) {
+      e = { data: null, err: '' }; patMap.set(key, e); if (patMap.size > 40) patMap.delete(patMap.keys().next().value);
+      api('GET', '/api/enforcement/patrol?from=' + from + '&to=' + to + (fac ? '&facility=' + encodeURIComponent(fac) : '') + (summary ? '&summary=1' : ''))
+        .then(d => { e.data = d; schedule(); }).catch(err => { e.err = err.message || 'Couldn’t load'; schedule(); });
+    }
+    return e;
+  }
+  window.patSummary = fac => { const t = dayStr(Date.now()), e = patGet(t, t, fac, true); return e.data ? e.data.totals : null; };
+  const RESULT = { violator: ['bad', 'Violator'], flagged: ['warn', 'Flagged, no notice'], ok: ['ok', 'Not violating'] };
+  window.vPatrol = function () {
+    const today = dayStr(Date.now()); if (!UI.patDay || UI.patDay > today) UI.patDay = today;
+    const day = UI.patDay, fac = UI.patFac && facById(UI.patFac) ? UI.patFac : '', show = UI.patShow || 'all';
+    const e = patGet(day, day, fac, false), wk = patGet(addDay(day, -6), day, fac, true);
+    if (e.data) UI.patLast = e.data;
+    const rep = e.data || (UI.patLast && UI.patLast.from === day && UI.patLast.facility === fac ? UI.patLast : null), loading = !e.data && !e.err;
+    const opt = (v, l, cur) => `<option value="${esc(v)}" ${String(v) === String(cur || '') ? 'selected' : ''}>${esc(l)}</option>`;
+    const tm = (t, fid) => new Date(t).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', timeZone: R.tzOf(facById(fid)) });
+    const n = x => (x || 0).toLocaleString();
+    const qs = `from=${day}&to=${day}${fac ? '&facility=' + encodeURIComponent(fac) : ''}`;
+    const bar = `<section class="panel"><div class="panel-b daybar">
+      <button class="btn sm" data-act="patStep" data-v="-1" aria-label="Day before">‹ Earlier</button>
+      <input id="patDate" data-fresh="1" type="date" value="${esc(day)}" max="${esc(today)}" aria-label="Day" style="flex:0 1 160px">
+      <button class="btn sm" data-act="patStep" data-v="1" aria-label="Day after" ${day >= today ? 'disabled' : ''}>Later ›</button>
+      ${day !== today ? '<button class="btn sm" data-act="patToday">Today</button>' : ''}
+      <span class="range">${esc(dayLabel(day, day.slice(0, 4) !== today.slice(0, 4)))}</span>${loading ? '<span class="muted">Loading…</span>' : ''}
+      <span style="flex:1"></span>
+      <select id="patFac" data-fresh="1" style="flex:0 1 220px" aria-label="Location">${opt('', 'All locations', fac)}${S.facilities.map(f => opt(f.id, f.name, fac)).join('')}</select>
+      <button class="btn sm" data-act="patRefresh">Refresh</button><a class="btn sm" href="/api/enforcement/patrol.csv?${esc(qs)}">CSV</a></div></section>`;
+    if (!rep) return bar + `<section class="panel"><div class="empty">${e.err ? esc(e.err) : 'Loading…'}</div></section>`;
+    const T = rep.totals, V = rep.vehicles || [];
+    const kpi = (label, val, sub, cls) => `<div class="kpi ${cls || ''}"><small>${label}</small><b>${val}</b><span>${sub || '&nbsp;'}</span></div>`;
+    const counts = { all: V.length, violator: T.violators, ok: T.ok, flagged: T.flagged };
+    const segBtn = (k, l) => `<button data-act="patShow" data-v="${k}" aria-pressed="${show === k}">${l} <span class="muted">${n(counts[k])}</span></button>`;
+    const row = v => {
+      const [lv] = RESULT[v.result], where = fac ? '' : esc(v.facilityName) + ' · ';
+      const t1 = tm(v.first, v.facilityId), t2 = tm(v.last, v.facilityId), when = (t1 !== t2 ? t1 + '–' + t2 : t2) + (v.checks > 1 ? ' · checked ' + v.checks + ' times' : '');
+      const live = v.notices.find(c => c.status !== 'voided');
+      const notes = v.notices.map(c => `<span class="pill ${c.status === 'voided' ? '' : 'bad'}">${esc(c.number)} · ${money(c.fine)}${c.status === 'voided' ? ' · voided' : c.status === 'paid' ? ' · paid' : c.status === 'appeal' ? ' · disputed' : ''}</span>`).join(' ');
+      const detail = v.result === 'ok' ? (v.lines[0] || v.reason) : v.result === 'flagged' ? (v.checks ? 'No notice issued' : 'Notice was voided') : (v.checks && v.kind && live && v.kind !== String(live.violation).toLowerCase() ? 'Check found: ' + v.reason : '');
+      return `<div class="li"><span class="sev ${lv}"></span>${plateChip(v.plate)}<div class="grow"><b>${esc(v.label)}</b>${notes ? ' ' + notes : ''}<span class="muted" style="display:block;font-size:.82rem">${detail ? esc(detail) + ' · ' : ''}${where}${when}${v.officers.length ? ' · ' + esc(v.officers.join(', ')) : ''}</span></div></div>`;
+    };
+    const group = (k, title, empty) => { const rows = V.filter(v => v.result === k); if (show !== 'all' && show !== k) return ''; if (!rows.length && show === 'all' && k === 'flagged') return '';
+      return `<section class="panel"><div class="panel-h"><h3>${title}</h3><span class="pill ${RESULT[k][0]}">${n(rows.length)}</span></div>${rows.length ? `<div class="list">${rows.map(row).join('')}</div>` : `<div class="empty">${empty}</div>`}</section>`; };
+    const facs = rep.byFacility.filter(f => f.checked || !fac);
+    const W = wk.data;
+    return bar + `<div class="kpis sm">
+      ${kpi('Vehicles checked', n(T.checked), fac ? esc(facById(fac).name) : rep.byFacility.filter(f => f.checked).length + ' location' + (rep.byFacility.filter(f => f.checked).length === 1 ? '' : 's'))}
+      ${kpi('Violators', n(T.violators), T.notices ? n(T.notices) + ' notice' + (T.notices === 1 ? '' : 's') + ' · ' + money(T.fines) : 'No notices', T.violators ? 'alert' : '')}
+      ${kpi('Not violating', n(T.ok), rep.reasons.slice(0, 3).map(r => r.label + ' ' + r.n).join(' · '))}
+      ${T.flagged ? kpi('Flagged, no notice', n(T.flagged), 'Looked like a violation') : ''}</div>
+    ${!fac && facs.length ? `<section class="panel"><div class="panel-h"><h3>By location</h3><span class="muted" style="font-size:.84rem">Click one to see only that location</span></div><div class="tbl-wrap"><table class="daytbl pattbl"><thead><tr><th>Location</th><th class="r">Checked</th><th class="r">Violators</th><th class="r">Not violating</th><th class="r">Notices</th><th class="r">Fines</th></tr></thead><tbody>${facs.map(f => `<tr data-act="patFacGo" data-id="${esc(f.id)}"><td>${esc(f.name)}</td><td class="r num">${n(f.checked)}</td><td class="r num">${f.violators ? `<b>${n(f.violators)}</b>` : '0'}</td><td class="r num">${n(f.ok)}</td><td class="r num">${n(f.notices)}</td><td class="r num">${money(f.fines)}</td></tr>`).join('')}</tbody></table></div></section>` : ''}
+    <div class="row"><div class="seg" role="group" aria-label="Show">${segBtn('all', 'All')}${segBtn('violator', 'Violators')}${segBtn('ok', 'Not violating')}${T.flagged ? segBtn('flagged', 'Flagged') : ''}</div></div>
+    ${!V.length ? `<section class="panel"><div class="empty">No plates were checked ${fac ? 'here ' : ''}on this day.</div></section>` : group('violator', 'Violators', 'No violators.') + group('flagged', 'Flagged, no notice', 'None.') + group('ok', 'Not violating', 'None.')}
+    ${rep.truncated ? '<p class="skip-note">Showing the most recent 5,000 vehicles. Download the CSV for all of them.</p>' : ''}
+    <section class="panel"><div class="panel-h"><h3>Week to ${esc(dayLabel(day))}</h3><span class="muted" style="font-size:.84rem">Click a day to open it</span></div>${W ? `<div class="tbl-wrap"><table class="daytbl pattbl"><thead><tr><th>Day</th><th class="r">Checked</th><th class="r">Violators</th><th class="r">Not violating</th><th class="r">Notices</th><th class="r">Fines</th></tr></thead><tbody>${W.days.slice().reverse().map(d => `<tr data-act="patDayGo" data-d="${d.date}" ${d.date === day ? 'aria-current="date" style="font-weight:600"' : ''}><td>${esc(dayLabel(d.date))}</td><td class="r num">${n(d.checked)}</td><td class="r num">${n(d.violators)}</td><td class="r num">${n(d.ok)}</td><td class="r num">${n(d.notices)}</td><td class="r num">${money(d.fines)}</td></tr>`).join('')}</tbody><tfoot><tr><td><b>7 days</b></td><td class="r num"><b>${n(W.totals.checked)}</b></td><td class="r num"><b>${n(W.totals.violators)}</b></td><td class="r num"><b>${n(W.totals.ok)}</b></td><td class="r num"><b>${n(W.totals.notices)}</b></td><td class="r num"><b>${money(W.totals.fines)}</b></td></tr></tfoot></table></div>` : `<div class="empty">${wk.err ? esc(wk.err) : 'Loading…'}</div>`}</section>
+    ${rep.byOfficer.length ? `<section class="panel"><div class="panel-h"><h3>By officer</h3></div><div class="tbl-wrap"><table><thead><tr><th>Officer</th><th class="r">Vehicles checked</th><th class="r">Notices</th></tr></thead><tbody>${rep.byOfficer.map(o => `<tr><td>${esc(o.name)}</td><td class="r num">${n(o.checked)}</td><td class="r num">${n(o.notices)}</td></tr>`).join('')}</tbody></table></div></section>` : ''}
+    <p class="skip-note">Days run midnight to midnight in ${esc(rep.timeZone)}. A vehicle checked more than once the same day at the same location counts once; if any check found a violation, that's what it shows. Notices written at the exit desk count too. Voided notices aren't counted.</p>`;
+  };
+  document.addEventListener('change', e => {
+    if (e.target.id === 'patFac') { UI.patFac = e.target.value; render(); }
+    else if (e.target.id === 'patDate' && /^\d{4}-\d{2}-\d{2}$/.test(e.target.value)) { UI.patDay = e.target.value; render(); }
+  });
+  Object.assign(ACT, {
+    patStep(b) { const t = dayStr(Date.now()), d = addDay(UI.patDay || t, +b.dataset.v); UI.patDay = d > t ? t : d; render(); },
+    patToday() { UI.patDay = dayStr(Date.now()); render(); },
+    patDayGo(b) { UI.patDay = b.dataset.d; render(); window.scrollTo(0, 0); },
+    patFacGo(b) { UI.patFac = b.dataset.id; render(); },
+    patShow(b) { UI.patShow = b.dataset.v; render(); },
+    patRefresh() { patMap.clear(); render(); },
+  });
+
   /* ---------- staff: people & access, system, activity log ---------- */
   const ROLE_HELP = { owner: 'Everything, including staff accounts', manager: 'Everything except staff accounts', attendant: 'Exit desk, tickets, valet, notices and reservations', accountant: 'Reports, payments, refunds, monthly billing and exports', viewer: 'Read-only' };
   window.hostedSettings = function () {
@@ -4540,6 +4707,9 @@ render();boot();
         return `<div><b>Saved forever:</b> ${st.tickets.toLocaleString()} ticket${st.tickets === 1 ? '' : 's'}${st.firstTicketAt ? ` since ${fmtFull(st.firstTicketAt, tzDefault()).replace(/,[^,]*$/, '')}` : ''}, plus every payment and change. Search them under History.</div>
         <div><b>Storage:</b> ${fmtBytes(st.database)} records · ${fmtBytes(st.backups)} backups · ${fmtBytes(st.photos)} photos (${st.photoCount.toLocaleString()}, kept ${st.photoDays} days)${st.disk ? ` · ${fmtBytes(st.disk.free)} free of ${fmtBytes(st.disk.total)}` : ''}</div>
         ${low ? '<div class="callout warn"><b>The disk is getting full.</b> Your records are safe, but make the disk bigger soon: in Render open the parkops service, choose Disks, and increase the size (it can grow, not shrink).</div>' : ''}`; })()}
+      ${(() => { const c = lazy('conn', '/api/admin/connection'); if (!c || c.error) return '';
+        return c.ok ? `<div><b>Visitor addresses:</b> each visitor is told apart by their own internet address (this computer: <span class="mono">${esc(c.seenAs)}</span>), so busy-night limits apply per person.</div>`
+          : `<div class="callout warn"><b>Visitors look like one address.</b> The server sees this computer as <span class="mono">${esc(c.seenAs)}</span>, but its real address is <span class="mono">${esc(c.cloudflare)}</span>. Until this is fixed, limits meant for one person apply to many. In Render open the parkops service, then Environment, add <span class="mono">CLIENT_IP_HEADER</span> with the value <span class="mono">cf-connecting-ip</span>, and save.</div>`; })()}
       <div class="row"><button class="btn" data-act="backupNow">Download a backup now</button></div></div></section>` : ''}
     <section class="panel" ${can('settings') ? '' : 'style="grid-column:1/-1"'}><div class="panel-h"><h2>Activity log</h2><button class="btn sm" data-act="reloadAudit">Refresh</button></div>
       ${!audit ? '<div class="empty">Loading…</div>' : audit.error ? `<div class="empty">${esc(audit.error)}</div>` : `<div class="tbl-wrap" style="max-height:420px;overflow:auto"><table><thead><tr><th>When</th><th>Who</th><th>What</th><th>Record</th></tr></thead><tbody>${audit.map(a => `<tr><td class="num">${fmtTime(a.at)}</td><td>${esc(a.actor || '')}</td><td>${esc(a.action)}</td><td class="mono">${esc([a.coll, a.doc_id].filter(Boolean).join('/'))}</td></tr>`).join('')}</tbody></table></div>`}</section></div>
@@ -4834,8 +5004,10 @@ render();boot();
     if (!it || t - it.at > TUNE.sameCarMs) {
       it = { id: ++SC.seq, key, plate: pl, facId, at: t, n: 1, score: r.score, state: r.state, manual: !!r.manual, alts: r.alts || [], level: v.level }; beep = true;
       SC.items.unshift(it); SC.byKey.set(key, it); SC.counts.checked++; if (v.level !== 'ok') SC.counts.flagged++;
+      log(it, r, v);
     } else {
       it.n++; const worse = rank(v.level) > rank(it.level) || (v.level !== it.level && it.dismissed); it.at = t;
+      if (v.level !== it.level && !it.cited) log(it, r, v);
       if (r.score > it.score) { it.score = r.score; it.state = r.state || it.state; it.alts = r.alts || it.alts; }
       if (worse && !it.cited) { beep = true; it.dismissed = false; if (it.level === 'ok') SC.counts.flagged++; }
       it.level = it.cited ? it.level : v.level;
@@ -4847,6 +5019,13 @@ render();boot();
     SC.cur = it; SC.curFresh = true;
     const view = $('#scView'); if (view) { view.dataset.hit = v.level; clearTimeout(SC.hitT); SC.hitT = setTimeout(() => { const vv = $('#scView'); if (vv) vv.dataset.hit = ''; }, 1600); }
     return { level: v.level, beep };
+  }
+  /* The patrol log keeps every vehicle checked. A doubtful read that looks like a violation waits until the officer acts
+     on it (issues a notice, or picks another plate), so misreads don't fill the log with violators that never were. */
+  function log(it, r, v) {
+    if (!window.recordCheck) return;
+    if (v.level !== 'ok' && !r.manual && r.score < TUNE.lowScore) { it.unlogged = true; return; }
+    it.unlogged = false; window.recordCheck(it.plate, it.facId, r.manual ? 'typed' : 'scanner', r.manual ? {} : { score: r.score });
   }
   function dropFrame(it) { if (it.thumb) { try { URL.revokeObjectURL(it.thumb); } catch (e) {} } it.thumb = null; it.frame = null; }
   function trimFrames() { const withF = SC.items.filter(x => x.frame); for (let i = TUNE.keepFrames; i < withF.length; i++) dropFrame(withF[i]); }
@@ -5044,7 +5223,7 @@ render();boot();
     else if (a === 'notice' && it) noticeForm(it);
     else if (a === 'dismiss' && it) { it.dismissed = true; if (SC.cur === it) SC.cur = SC.items.find(x => !x.dismissed && x !== it) || null; renderAll(); }
     else if (a === 'print' && it) { const c = byId('citations', it.citeId); b.disabled = true; await printCite(it, c); renderAll(); }
-    else if (a === 'use' && it) { const pl = normPlate(b.dataset.plate); if (pl) { SC.byKey.delete(it.key); const v = verdictOf(pl, it.facId); Object.assign(it, { plate: pl, key: it.facId + '|' + pl, alts: [], score: 1, level: v.level, title: v.title, lines: v.lines || [], suggest: v.suggest, towEligible: !!v.towEligible, hot: !!v.hot }); SC.byKey.set(it.key, it); SC.cur = it; alertFor(v.level); renderAll(); } }
+    else if (a === 'use' && it) { const pl = normPlate(b.dataset.plate); if (pl) { SC.byKey.delete(it.key); const v = verdictOf(pl, it.facId); Object.assign(it, { plate: pl, key: it.facId + '|' + pl, alts: [], score: 1, level: v.level, title: v.title, lines: v.lines || [], suggest: v.suggest, towEligible: !!v.towEligible, hot: !!v.hot }); SC.byKey.set(it.key, it); SC.cur = it; log(it, { manual: true }, v); alertFor(v.level); renderAll(); } }
   });
   document.addEventListener('submit', e => {
     if (!e.target.closest('#scManual')) return; e.preventDefault();

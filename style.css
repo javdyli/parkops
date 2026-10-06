@@ -165,6 +165,7 @@ input:focus,select:focus,textarea:focus{border-color:var(--accent);outline:none;
 
 /* enforcement */
 .enf{max-width:760px;width:100%;margin:0 auto;display:grid;gap:16px}
+.enf.wide{max-width:1100px}
 .plate-in{font-family:var(--f-display);font-size:2.2rem;font-weight:700;letter-spacing:.14em;text-transform:uppercase;text-align:center;background:var(--plate-bg);color:var(--plate-fg);border:3px solid var(--plate-line);border-radius:10px;padding:8px 12px}
 .plate-in::placeholder{color:#9aa6ba;letter-spacing:.08em}
 .verdict{border-radius:var(--r);padding:18px;display:grid;gap:6px;border:2px solid}

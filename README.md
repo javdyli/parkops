@@ -13,6 +13,7 @@ Parking operations for downtown garages and lots, in one small Node app:
 - 23 reports with CSV export: revenue, payments, shift close-out, waived, A/R aging, sales tax, occupancy, exits, customers & vehicles, monthly, invoices, VIP, ratings, validations, code occupancy, tenant allotments, notices, reservations, staff.
 - Square payments, invoices, Terminal, Apple Pay and Google Pay. Twilio texts. Photo evidence and Zebra notice printing.
 - **Enforcement from an iPhone or iPad:** hold the phone over plates, ParkOps reads each one, checks it against permits, payments and open notices, and shows OK, Check or Violation. The officer confirms the plate, issues the notice and prints it on a Zebra printer (needs a plate-reading service, see section 11).
+- **Patrol log:** every plate officers check is kept, so you can pick any day and location and see the violators (with their notices) and the vehicles that were fine (and why), plus the week and each officer's numbers.
 
 Setup:
 
@@ -185,6 +186,8 @@ Twilio handles STOP, START and HELP automatically.
 
 ## 8. Cameras (LPR garages)
 
+**Connecting a camera:** add one lane camera per entry and exit lane (Cameras → Add lane camera), then press **Connect**. It shows the lane's address, the steps, and the camera's status: *Waiting for first read*, *No plate in messages* (the camera reaches ParkOps but its message has no plate ParkOps can read; the last message is shown, images removed, so you can see what it sends), or the last plate read. ParkOps never connects to the camera: the camera sends to ParkOps, so it must be able to reach your ParkOps address over the internet (HTTPS, port 443). A camera's own web page can be saved on the camera as a link for reference.
+
 **Hikvision ANPR:** *Configuration → Network → Advanced → HTTP Listening* (or *Alarm Server*): Host = your domain, URL = `/lpr/<lane token>`, port 443, HTTPS; turn on **Notify Surveillance Center / Upload to Center** in the ANPR event. ParkOps reads `<licensePlate>` and `<confidenceLevel>` and saves the plate picture.
 
 **Axis License Plate Verifier:** *Settings → Integration → Push events*: HTTP POST, JSON, URL `https://your-domain/lpr/<token>`; turn on image sending for photos. Only `carState: new` is counted.
@@ -254,7 +257,22 @@ The officer taps **Issue notice**, confirms the plate (the form shows how sure t
 - Not tested on a real iPhone, in Bluefy, or on real plates. How sharp a plate has to be, how still the officer must hold the phone and how different a new car looks are settings at the top of `src/scan.js` (the `TUNE` block). If it reads too rarely or too often after a day of real patrols, those numbers are the knobs, and **Every second** mode and **Read now** are the quick fixes in the field.
 - Works best in daylight, 3 to 12 feet from the plate, square-on. Glare, dirt, frames around plates and very dark lots lower accuracy; tap **Light** (where the phone allows it) at night.
 - The phone needs a data signal. With no signal it keeps trying and says so, and typing a plate still checks it against what the phone already has, but notices can't be saved until the connection is back.
-- The list of scanned vehicles lives on the phone for the patrol and is cleared when the scanner is closed (notices already issued are saved on the server).
+- The list of scanned vehicles lives on the phone for the patrol and is cleared when the scanner is closed. What each check found is saved on the server for the patrol log (below), and notices are saved as always.
+
+### Patrol log: by day and location, violators and vehicles that were fine
+
+Every plate an officer checks is saved with what the check found: plates typed on the Enforcement screen and plates read by the phone scanner. A doubtful scanner read that looks like a violation is saved only once the officer acts on it, so misreads don't show up as violators.
+
+Open it from **Enforcement → Patrol log**, or **Operations → Notices → Patrol log**. Pick a day (‹ Earlier, Later ›, or the date box) and a location, or leave it on all locations. You see:
+
+- **Totals:** vehicles checked, violators (with the number of notices and the fines written), vehicles not violating (and why: monthly parker, paid, validated, pays on exit, in grace), and vehicles flagged with no notice written.
+- **By location:** the same numbers for each garage and lot. Click a row to see only that location.
+- **The vehicles:** violators with their notice number, amount and status; flagged vehicles with no notice; and the vehicles that were fine, with the reason, the time and the officer. **All / Violators / Not violating** narrows the list.
+- **The week:** the seven days ending on the chosen day. Click a day to open it.
+- **By officer:** vehicles checked and notices written by each officer.
+- **CSV:** the day's vehicles as a spreadsheet.
+
+A car checked more than once the same day at the same location counts once; if any check found a violation, that's what it shows. Notices written at the exit desk for unpaid exits count as violators too. A voided notice (including an appeal you accepted) no longer counts. Days run midnight to midnight in the time zone in Settings. The Enforcement screen also shows today's numbers for the location being patrolled. Checks made before this update weren't saved, so the log starts on the day you install it; earlier notices still show by day.
 - Beeps use the phone's sound; the iPhone's side silent switch can mute them. The screen also flashes and the box changes color.
 - iPhone keeps the screen awake while scanning (iOS 16.4 and newer). On older iPhones set Auto-Lock to Never for the patrol.
 - "Add to Home Screen" in Safari makes ParkOps open full-screen like an app. Printing still needs Bluefy.
@@ -314,6 +332,20 @@ Built for several garages and lots with thousands of plates a day and thousands 
 | 400 monthly parkers charged on the 1st, one card each, with a payment-processor hiccup on the first charge | all 400 charged, none twice, billing run again charged nobody |
 | 1,000 monthly parkers in an account's pasted list | previewed and added in a few seconds |
 
+**Busy nights: thousands of people at once.** Measured on a copy capped at Render's sizes, with 5,000 past visits on file and Square answering in 0.6 to 1.1 seconds. Each run squeezes an event night into one minute: drivers scan the lot QR signs, load the page, check prices, one in four pays and the rest look up their plate; garage cameras log an entry for every 1.3 drivers; 4 attendants collect the $25 event rate; 4 officers check plates; 12 staff screens on one office network stay live. Drivers share internet addresses the way they do downtown (venue Wi-Fi, phone carriers).
+
+| Drivers arriving in one minute | Starter (0.5 CPU, 512 MB) | Standard (1 CPU, 2 GB) |
+|---|---|---|
+| 2,000 | 100% answered within a second | |
+| 3,000 | 99.98% | |
+| 5,000 | 99.6% (peak memory 268 MB) | 100% |
+| 10,000 | 56%: falls behind, waits up to 70 s | 99.1% |
+| 15,000 | | 63%: falls behind |
+
+A real event night is far lighter: 2,000 cars over an hour is about 35 a minute. Card payments count as answered within 2 seconds, since Square itself takes about one.
+
+What makes this work (version 5): driver limits count per plate on top of a high ceiling per address, so a crowd on one Wi-Fi isn't treated as one person; card payments from an address pause for 15 minutes only when at least 10 cards were declined there and declines were most of its attempts (card testing); driver pages don't hold a live connection, and staff screens have their own room (25 per person, none per address); tickets are indexed by plate; big staff-screen loads are compressed off the main thread; phones reuse the page they already have (ETag). **Settings → System → Visitor addresses** shows whether the server sees each visitor's own address; if it warns, set `CLIENT_IP_HEADER` as it says.
+
 **How fast messages can go out.** Email and texts are paced so the provider never turns them away, and retried when it says "slow down". Defaults match the providers' starter limits: `EMAIL_PER_SEC=2` (Resend's default plan) and `SMS_PER_SEC=1` (one Twilio number). At those speeds 1,000 emails take about 8 minutes and 1,000 texts about 17 minutes; raise the settings when your plan allows more (a registered 10DLC campaign or a toll-free number sends faster). Anything a person is waiting for (a password reset, an invitation) goes ahead of bulk reminders. **Settings → Recent emails / texts** shows how many are waiting, sent and failed.
 A message the provider might already have accepted is never sent twice: email carries a repeat-protection key, and a text is not retried after an unclear failure (a timeout or dropped connection), because a missed reminder is better than a double one.
 
@@ -325,6 +357,7 @@ A message the provider might already have accepted is never sent twice: email ca
 | `BILLING_CONCURRENCY` | 4 | cards charged at once on the 1st |
 | `KEEP_IN_MEMORY_DAYS` / `KEEP_CLOSED_MAX` | 90 / 5000 | finished tickets the screens keep in memory (the cap wins on a very busy lot; everything stays in History and By day) |
 | `PORTAL_ADDS_PER_DAY` | 500 | parkers one account link may add in 24 hours |
+| `CLIENT_IP_HEADER` | (none) | a header your host puts the visitor's address in, for example `cf-connecting-ip`; only when Settings → System says it's needed |
 | `RESEND_BASE_URL`, `TWILIO_BASE_URL` | the real ones | only for testing against a stand-in |
 
 **Known limits and gaps. Read these before relying on it:**

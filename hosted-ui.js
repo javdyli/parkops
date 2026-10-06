@@ -48,6 +48,7 @@
   #chTip{position:fixed;z-index:60;background:var(--fg);color:var(--bg,#fff);padding:6px 10px;border-radius:6px;font-size:.8rem;line-height:1.35;white-space:pre-line;pointer-events:none;box-shadow:0 4px 14px rgba(0,0,0,.25);max-width:260px}
   .daytbl tr[data-act] {cursor:pointer}.daytbl tr[data-act]:hover td{background:var(--surface-2)}
   .kpis.sm .kpi b{font-size:1.55rem}
+  .pattbl td:first-child,.pattbl th:first-child{white-space:nowrap}
   .skip-note{font-size:.84rem;color:var(--muted)}`;
   document.head.appendChild(css);
   /* The print area and printNow() are shared with the self-parking screens (tickets.js). */
@@ -1059,6 +1060,91 @@
     dayOpen(b) { Object.assign(UI, { histQ: '', histFac: UI.dyFac || '', histStatus: '', histFrom: b.dataset.d, histTo: b.dataset.d, histOff: 0 }); UI.hist = undefined; ACT.goTab({ dataset: { tab: 'history' } }); },
   });
 
+  /* ---------- enforcement: patrol log ----------
+     Every plate an officer checks (typed, or read by the phone scanner) is saved with what the check found. Pick a day and a
+     location to see who was violating and who wasn't, with the notices written, and the week around it. */
+  window.recordCheck = function (plate, facilityId, source, extra) {
+    const pl = normPlate(plate || ''); if (pl.length < 2 || !facilityId) return Promise.resolve(null);
+    return api('POST', '/api/enforcement/check', Object.assign({ plate: pl, facilityId, source: source || 'typed', zone: UI.enfZone === 'reserved' ? 'reserved' : 'general' }, extra || {}))
+      .then(r => { patReset(); return r; }).catch(() => null);
+  };
+  const patMap = new Map();
+  function patReset() { patMap.clear(); if (UI.role === 'enf' || UI.role === 'ops' && UI.tab === 'citations' && UI.citeView === 'patrol') schedule(); }
+  window.patReset = patReset;
+  function patGet(from, to, fac, summary) {
+    const key = [from, to, fac || '', summary ? 1 : 0, to >= dayStr(Date.now()) ? Math.floor(Date.now() / 6e4) : ''].join('|');
+    let e = patMap.get(key);
+    if (!e) {
+      e = { data: null, err: '' }; patMap.set(key, e); if (patMap.size > 40) patMap.delete(patMap.keys().next().value);
+      api('GET', '/api/enforcement/patrol?from=' + from + '&to=' + to + (fac ? '&facility=' + encodeURIComponent(fac) : '') + (summary ? '&summary=1' : ''))
+        .then(d => { e.data = d; schedule(); }).catch(err => { e.err = err.message || 'Couldn’t load'; schedule(); });
+    }
+    return e;
+  }
+  window.patSummary = fac => { const t = dayStr(Date.now()), e = patGet(t, t, fac, true); return e.data ? e.data.totals : null; };
+  const RESULT = { violator: ['bad', 'Violator'], flagged: ['warn', 'Flagged, no notice'], ok: ['ok', 'Not violating'] };
+  window.vPatrol = function () {
+    const today = dayStr(Date.now()); if (!UI.patDay || UI.patDay > today) UI.patDay = today;
+    const day = UI.patDay, fac = UI.patFac && facById(UI.patFac) ? UI.patFac : '', show = UI.patShow || 'all';
+    const e = patGet(day, day, fac, false), wk = patGet(addDay(day, -6), day, fac, true);
+    if (e.data) UI.patLast = e.data;
+    const rep = e.data || (UI.patLast && UI.patLast.from === day && UI.patLast.facility === fac ? UI.patLast : null), loading = !e.data && !e.err;
+    const opt = (v, l, cur) => `<option value="${esc(v)}" ${String(v) === String(cur || '') ? 'selected' : ''}>${esc(l)}</option>`;
+    const tm = (t, fid) => new Date(t).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', timeZone: R.tzOf(facById(fid)) });
+    const n = x => (x || 0).toLocaleString();
+    const qs = `from=${day}&to=${day}${fac ? '&facility=' + encodeURIComponent(fac) : ''}`;
+    const bar = `<section class="panel"><div class="panel-b daybar">
+      <button class="btn sm" data-act="patStep" data-v="-1" aria-label="Day before">‹ Earlier</button>
+      <input id="patDate" data-fresh="1" type="date" value="${esc(day)}" max="${esc(today)}" aria-label="Day" style="flex:0 1 160px">
+      <button class="btn sm" data-act="patStep" data-v="1" aria-label="Day after" ${day >= today ? 'disabled' : ''}>Later ›</button>
+      ${day !== today ? '<button class="btn sm" data-act="patToday">Today</button>' : ''}
+      <span class="range">${esc(dayLabel(day, day.slice(0, 4) !== today.slice(0, 4)))}</span>${loading ? '<span class="muted">Loading…</span>' : ''}
+      <span style="flex:1"></span>
+      <select id="patFac" data-fresh="1" style="flex:0 1 220px" aria-label="Location">${opt('', 'All locations', fac)}${S.facilities.map(f => opt(f.id, f.name, fac)).join('')}</select>
+      <button class="btn sm" data-act="patRefresh">Refresh</button><a class="btn sm" href="/api/enforcement/patrol.csv?${esc(qs)}">CSV</a></div></section>`;
+    if (!rep) return bar + `<section class="panel"><div class="empty">${e.err ? esc(e.err) : 'Loading…'}</div></section>`;
+    const T = rep.totals, V = rep.vehicles || [];
+    const kpi = (label, val, sub, cls) => `<div class="kpi ${cls || ''}"><small>${label}</small><b>${val}</b><span>${sub || '&nbsp;'}</span></div>`;
+    const counts = { all: V.length, violator: T.violators, ok: T.ok, flagged: T.flagged };
+    const segBtn = (k, l) => `<button data-act="patShow" data-v="${k}" aria-pressed="${show === k}">${l} <span class="muted">${n(counts[k])}</span></button>`;
+    const row = v => {
+      const [lv] = RESULT[v.result], where = fac ? '' : esc(v.facilityName) + ' · ';
+      const t1 = tm(v.first, v.facilityId), t2 = tm(v.last, v.facilityId), when = (t1 !== t2 ? t1 + '–' + t2 : t2) + (v.checks > 1 ? ' · checked ' + v.checks + ' times' : '');
+      const live = v.notices.find(c => c.status !== 'voided');
+      const notes = v.notices.map(c => `<span class="pill ${c.status === 'voided' ? '' : 'bad'}">${esc(c.number)} · ${money(c.fine)}${c.status === 'voided' ? ' · voided' : c.status === 'paid' ? ' · paid' : c.status === 'appeal' ? ' · disputed' : ''}</span>`).join(' ');
+      const detail = v.result === 'ok' ? (v.lines[0] || v.reason) : v.result === 'flagged' ? (v.checks ? 'No notice issued' : 'Notice was voided') : (v.checks && v.kind && live && v.kind !== String(live.violation).toLowerCase() ? 'Check found: ' + v.reason : '');
+      return `<div class="li"><span class="sev ${lv}"></span>${plateChip(v.plate)}<div class="grow"><b>${esc(v.label)}</b>${notes ? ' ' + notes : ''}<span class="muted" style="display:block;font-size:.82rem">${detail ? esc(detail) + ' · ' : ''}${where}${when}${v.officers.length ? ' · ' + esc(v.officers.join(', ')) : ''}</span></div></div>`;
+    };
+    const group = (k, title, empty) => { const rows = V.filter(v => v.result === k); if (show !== 'all' && show !== k) return ''; if (!rows.length && show === 'all' && k === 'flagged') return '';
+      return `<section class="panel"><div class="panel-h"><h3>${title}</h3><span class="pill ${RESULT[k][0]}">${n(rows.length)}</span></div>${rows.length ? `<div class="list">${rows.map(row).join('')}</div>` : `<div class="empty">${empty}</div>`}</section>`; };
+    const facs = rep.byFacility.filter(f => f.checked || !fac);
+    const W = wk.data;
+    return bar + `<div class="kpis sm">
+      ${kpi('Vehicles checked', n(T.checked), fac ? esc(facById(fac).name) : rep.byFacility.filter(f => f.checked).length + ' location' + (rep.byFacility.filter(f => f.checked).length === 1 ? '' : 's'))}
+      ${kpi('Violators', n(T.violators), T.notices ? n(T.notices) + ' notice' + (T.notices === 1 ? '' : 's') + ' · ' + money(T.fines) : 'No notices', T.violators ? 'alert' : '')}
+      ${kpi('Not violating', n(T.ok), rep.reasons.slice(0, 3).map(r => r.label + ' ' + r.n).join(' · '))}
+      ${T.flagged ? kpi('Flagged, no notice', n(T.flagged), 'Looked like a violation') : ''}</div>
+    ${!fac && facs.length ? `<section class="panel"><div class="panel-h"><h3>By location</h3><span class="muted" style="font-size:.84rem">Click one to see only that location</span></div><div class="tbl-wrap"><table class="daytbl pattbl"><thead><tr><th>Location</th><th class="r">Checked</th><th class="r">Violators</th><th class="r">Not violating</th><th class="r">Notices</th><th class="r">Fines</th></tr></thead><tbody>${facs.map(f => `<tr data-act="patFacGo" data-id="${esc(f.id)}"><td>${esc(f.name)}</td><td class="r num">${n(f.checked)}</td><td class="r num">${f.violators ? `<b>${n(f.violators)}</b>` : '0'}</td><td class="r num">${n(f.ok)}</td><td class="r num">${n(f.notices)}</td><td class="r num">${money(f.fines)}</td></tr>`).join('')}</tbody></table></div></section>` : ''}
+    <div class="row"><div class="seg" role="group" aria-label="Show">${segBtn('all', 'All')}${segBtn('violator', 'Violators')}${segBtn('ok', 'Not violating')}${T.flagged ? segBtn('flagged', 'Flagged') : ''}</div></div>
+    ${!V.length ? `<section class="panel"><div class="empty">No plates were checked ${fac ? 'here ' : ''}on this day.</div></section>` : group('violator', 'Violators', 'No violators.') + group('flagged', 'Flagged, no notice', 'None.') + group('ok', 'Not violating', 'None.')}
+    ${rep.truncated ? '<p class="skip-note">Showing the most recent 5,000 vehicles. Download the CSV for all of them.</p>' : ''}
+    <section class="panel"><div class="panel-h"><h3>Week to ${esc(dayLabel(day))}</h3><span class="muted" style="font-size:.84rem">Click a day to open it</span></div>${W ? `<div class="tbl-wrap"><table class="daytbl pattbl"><thead><tr><th>Day</th><th class="r">Checked</th><th class="r">Violators</th><th class="r">Not violating</th><th class="r">Notices</th><th class="r">Fines</th></tr></thead><tbody>${W.days.slice().reverse().map(d => `<tr data-act="patDayGo" data-d="${d.date}" ${d.date === day ? 'aria-current="date" style="font-weight:600"' : ''}><td>${esc(dayLabel(d.date))}</td><td class="r num">${n(d.checked)}</td><td class="r num">${n(d.violators)}</td><td class="r num">${n(d.ok)}</td><td class="r num">${n(d.notices)}</td><td class="r num">${money(d.fines)}</td></tr>`).join('')}</tbody><tfoot><tr><td><b>7 days</b></td><td class="r num"><b>${n(W.totals.checked)}</b></td><td class="r num"><b>${n(W.totals.violators)}</b></td><td class="r num"><b>${n(W.totals.ok)}</b></td><td class="r num"><b>${n(W.totals.notices)}</b></td><td class="r num"><b>${money(W.totals.fines)}</b></td></tr></tfoot></table></div>` : `<div class="empty">${wk.err ? esc(wk.err) : 'Loading…'}</div>`}</section>
+    ${rep.byOfficer.length ? `<section class="panel"><div class="panel-h"><h3>By officer</h3></div><div class="tbl-wrap"><table><thead><tr><th>Officer</th><th class="r">Vehicles checked</th><th class="r">Notices</th></tr></thead><tbody>${rep.byOfficer.map(o => `<tr><td>${esc(o.name)}</td><td class="r num">${n(o.checked)}</td><td class="r num">${n(o.notices)}</td></tr>`).join('')}</tbody></table></div></section>` : ''}
+    <p class="skip-note">Days run midnight to midnight in ${esc(rep.timeZone)}. A vehicle checked more than once the same day at the same location counts once; if any check found a violation, that's what it shows. Notices written at the exit desk count too. Voided notices aren't counted.</p>`;
+  };
+  document.addEventListener('change', e => {
+    if (e.target.id === 'patFac') { UI.patFac = e.target.value; render(); }
+    else if (e.target.id === 'patDate' && /^\d{4}-\d{2}-\d{2}$/.test(e.target.value)) { UI.patDay = e.target.value; render(); }
+  });
+  Object.assign(ACT, {
+    patStep(b) { const t = dayStr(Date.now()), d = addDay(UI.patDay || t, +b.dataset.v); UI.patDay = d > t ? t : d; render(); },
+    patToday() { UI.patDay = dayStr(Date.now()); render(); },
+    patDayGo(b) { UI.patDay = b.dataset.d; render(); window.scrollTo(0, 0); },
+    patFacGo(b) { UI.patFac = b.dataset.id; render(); },
+    patShow(b) { UI.patShow = b.dataset.v; render(); },
+    patRefresh() { patMap.clear(); render(); },
+  });
+
   /* ---------- staff: people & access, system, activity log ---------- */
   const ROLE_HELP = { owner: 'Everything, including staff accounts', manager: 'Everything except staff accounts', attendant: 'Exit desk, tickets, valet, notices and reservations', accountant: 'Reports, payments, refunds, monthly billing and exports', viewer: 'Read-only' };
   window.hostedSettings = function () {
@@ -1081,6 +1167,9 @@
         return `<div><b>Saved forever:</b> ${st.tickets.toLocaleString()} ticket${st.tickets === 1 ? '' : 's'}${st.firstTicketAt ? ` since ${fmtFull(st.firstTicketAt, tzDefault()).replace(/,[^,]*$/, '')}` : ''}, plus every payment and change. Search them under History.</div>
         <div><b>Storage:</b> ${fmtBytes(st.database)} records · ${fmtBytes(st.backups)} backups · ${fmtBytes(st.photos)} photos (${st.photoCount.toLocaleString()}, kept ${st.photoDays} days)${st.disk ? ` · ${fmtBytes(st.disk.free)} free of ${fmtBytes(st.disk.total)}` : ''}</div>
         ${low ? '<div class="callout warn"><b>The disk is getting full.</b> Your records are safe, but make the disk bigger soon: in Render open the parkops service, choose Disks, and increase the size (it can grow, not shrink).</div>' : ''}`; })()}
+      ${(() => { const c = lazy('conn', '/api/admin/connection'); if (!c || c.error) return '';
+        return c.ok ? `<div><b>Visitor addresses:</b> each visitor is told apart by their own internet address (this computer: <span class="mono">${esc(c.seenAs)}</span>), so busy-night limits apply per person.</div>`
+          : `<div class="callout warn"><b>Visitors look like one address.</b> The server sees this computer as <span class="mono">${esc(c.seenAs)}</span>, but its real address is <span class="mono">${esc(c.cloudflare)}</span>. Until this is fixed, limits meant for one person apply to many. In Render open the parkops service, then Environment, add <span class="mono">CLIENT_IP_HEADER</span> with the value <span class="mono">cf-connecting-ip</span>, and save.</div>`; })()}
       <div class="row"><button class="btn" data-act="backupNow">Download a backup now</button></div></div></section>` : ''}
     <section class="panel" ${can('settings') ? '' : 'style="grid-column:1/-1"'}><div class="panel-h"><h2>Activity log</h2><button class="btn sm" data-act="reloadAudit">Refresh</button></div>
       ${!audit ? '<div class="empty">Loading…</div>' : audit.error ? `<div class="empty">${esc(audit.error)}</div>` : `<div class="tbl-wrap" style="max-height:420px;overflow:auto"><table><thead><tr><th>When</th><th>Who</th><th>What</th><th>Record</th></tr></thead><tbody>${audit.map(a => `<tr><td class="num">${fmtTime(a.at)}</td><td>${esc(a.actor || '')}</td><td>${esc(a.action)}</td><td class="mono">${esc([a.coll, a.doc_id].filter(Boolean).join('/'))}</td></tr>`).join('')}</tbody></table></div>`}</section></div>

@@ -47,6 +47,9 @@ class Store {
     this.db.exec(`CREATE TABLE IF NOT EXISTS terminals (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, device_id TEXT, amount_cents INTEGER NOT NULL, status TEXT NOT NULL, close_ticket INTEGER NOT NULL DEFAULT 0, staff TEXT, payment_id TEXT, applied INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL, updated_at INTEGER);
       CREATE INDEX IF NOT EXISTS terminals_session ON terminals (session_id, created_at DESC)`);
     addCol('terminals', 'full_balance INTEGER NOT NULL DEFAULT 1');
+    // v5: every plate an officer checks (typed or scanned), violators and vehicles that were fine alike: the patrol log.
+    this.db.exec(`CREATE TABLE IF NOT EXISTS checks (id INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER NOT NULL, facility_id TEXT, plate TEXT NOT NULL, staff_id TEXT, officer TEXT, source TEXT, level TEXT, violator INTEGER NOT NULL DEFAULT 0, kind TEXT, title TEXT, suggest TEXT, detail TEXT);
+      CREATE INDEX IF NOT EXISTS checks_at ON checks (at)`);
     // v4: staff roles were renamed; old rows keep working under their new names.
     this.db.exec("UPDATE users SET role='owner' WHERE role='admin'; UPDATE users SET role='attendant' WHERE role='officer'");
     // Every ticket stays in the database forever; this index keeps the History search fast with years of tickets.
@@ -78,6 +81,17 @@ class Store {
   async del(coll, id) { this.q.del.run(coll, id); }
   async addRead(r) { this.q.addRead.run(Math.round(r.at), r.cameraId || null, r.plate || null, JSON.stringify(r)); }
   async recentReads(n) { return this.q.recent.all(n).map(r => JSON.parse(r.data)); }
+  /* Plate checks for the patrol log. */
+  addCheck(c) {
+    const r = this.run('INSERT INTO checks (at, facility_id, plate, staff_id, officer, source, level, violator, kind, title, suggest, detail) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',
+      Math.round(c.at), c.facilityId || null, c.plate, c.staffId || null, c.officer || null, c.source || null, c.level || null, c.violator ? 1 : 0, c.kind || null, c.title || null, c.suggest || null, c.detail ? JSON.stringify(c.detail).slice(0, 4000) : null);
+    return Number(r.lastInsertRowid);
+  }
+  checksBetween(from, to, facility, limit = 20000) {
+    const w = ['at >= ?', 'at < ?'], v = [+from, +to]; if (facility) { w.push('facility_id = ?'); v.push(String(facility)); }
+    return this.all(`SELECT id, at, facility_id, plate, staff_id, officer, source, level, violator, kind, title, suggest, detail FROM checks WHERE ${w.join(' AND ')} ORDER BY at LIMIT ?`, ...v, limit)
+      .map(r => { let d = null; try { d = r.detail ? JSON.parse(r.detail) : null; } catch (e) {} return Object.assign(r, { detail: d }); });
+  }
   audit(actor, action, coll, docId, detail) {
     try { this.q.audit.run(Date.now(), actor || null, action, coll || null, docId || null, detail ? JSON.stringify(detail).slice(0, 20000) : null); } catch (e) { console.error('audit failed', e.message); }
   }
